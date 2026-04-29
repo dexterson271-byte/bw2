@@ -1,7 +1,8 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import aiohttp, os
+import aiohttp, os, platform, time
+import psutil
 
 from card import build_card
 
@@ -10,6 +11,7 @@ API_BASE  = os.getenv("API_BASE", "http://srv125.godlike.club:26045/api/v1/playe
 API_KEY   = os.getenv("API_KEY", "")
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
 ALL_MODES = ["Overall", "Solo", "Doubles", "4v4", "1v1", "4v4v4v4"]
+START_TIME = time.time()
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -30,6 +32,32 @@ def _fmt(n):
     except: return str(n)
 
 def _ratio(a, b): return round(a / b, 2) if b else float(a)
+
+def _fmt_bytes(n: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(n)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+
+def _fmt_uptime(seconds: float) -> str:
+    seconds = int(seconds)
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+def _usage_bar(percent: float, width: int = 14) -> str:
+    filled = round(width * max(0, min(percent, 100)) / 100)
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
 
 def _available_modes(p: dict) -> list:
     groups = (p.get("groupStats") or {}).get("groups") or {}
@@ -170,6 +198,56 @@ async def bedwars(interaction: discord.Interaction, username: str, table: bool =
 
     except Exception as e:
         await interaction.followup.send(f"❌ Image Error\n`{e}`")
+
+# ── System command ─────────────────────────────────────────────────────────────
+@bot.tree.command(name="uses", description="Show bot server resource usage")
+@app_commands.allowed_contexts(guilds=True, dms=True)
+async def uses(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+
+    cpu_percent = psutil.cpu_percent(interval=0.4)
+    cpu_count = psutil.cpu_count() or 1
+    mem = psutil.virtual_memory()
+    disk = psutil.disk_usage("/")
+    proc = psutil.Process(os.getpid())
+    proc_mem = proc.memory_info().rss
+
+    embed = discord.Embed(
+        title="HellCore Resource Usage",
+        description="Live container stats for the bot worker.",
+        color=discord.Color.from_rgb(85, 255, 255),
+        timestamp=discord.utils.utcnow(),
+    )
+
+    embed.add_field(
+        name="CPU",
+        value=f"`{_usage_bar(cpu_percent)}`\n`{cpu_percent:.1f}%` across `{cpu_count}` cores",
+        inline=False,
+    )
+    embed.add_field(
+        name="Memory",
+        value=(
+            f"`{_usage_bar(mem.percent)}`\n"
+            f"`{_fmt_bytes(mem.used)}` / `{_fmt_bytes(mem.total)}` (`{mem.percent:.1f}%`)\n"
+            f"Bot process: `{_fmt_bytes(proc_mem)}`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Storage",
+        value=(
+            f"`{_usage_bar(disk.percent)}`\n"
+            f"`{_fmt_bytes(disk.used)}` / `{_fmt_bytes(disk.total)}` (`{disk.percent:.1f}%`)"
+        ),
+        inline=False,
+    )
+    embed.add_field(name="Uptime", value=f"`{_fmt_uptime(time.time() - START_TIME)}`", inline=True)
+    embed.add_field(name="Python", value=f"`{platform.python_version()}`", inline=True)
+    embed.add_field(name="Platform", value=f"`{platform.system()} {platform.machine()}`", inline=True)
+    embed.set_footer(text=f"Requested by {interaction.user}")
+
+    await interaction.followup.send(embed=embed)
+
 
 # ── Startup ────────────────────────────────────────────────────────────────────
 @bot.event
