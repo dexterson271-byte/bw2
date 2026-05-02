@@ -3,3 +3,4 @@ audioop-lts==0.2.1; python_version >= "3.13"
 discord.py==2.4.0
 Pillow==10.4.0
 psutil==5.9.8
+matplotlib==3.9.0

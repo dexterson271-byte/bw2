@@ -1,8 +1,11 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import aiohttp, os, platform, time
+import aiohttp, os, platform, time, io, json
 import psutil
+import matplotlib.pyplot as plt
+from datetime import datetime
+from discord.ext import tasks
 
 from card import build_card
 
@@ -12,6 +15,10 @@ API_KEY   = os.getenv("API_KEY", "")
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
 ALL_MODES = ["Overall", "Solo", "Doubles", "4v4", "1v1", "4v4v4v4"]
 START_TIME = time.time()
+STATUS_CHANNEL_ID = 1493686255844593674
+MC_SERVER_ADDR = "mc.hellcore.com"
+HISTORY_FILE = "player_history.json"
+MAX_HISTORY = 720  # 24 hours (720 * 2 min = 1440 min)
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -255,6 +262,107 @@ async def on_ready():
     await bot.tree.sync()
     print(f"✅ Logged in as {bot.user}")
     print("✅ Commands synced")
+    update_status_embed.start()
+
+# ── Status Task ────────────────────────────────────────────────────────────────
+player_history = []
+if os.path.exists(HISTORY_FILE):
+    try:
+        with open(HISTORY_FILE, "r") as f:
+            player_history = json.load(f)
+    except: pass
+
+def generate_player_graph(history):
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(10, 4))
+    
+    if not history:
+        ax.text(0.5, 0.5, "No data yet", ha='center', va='center', color='gray')
+    else:
+        # Get last 60 points for the graph (2 hours)
+        recent = history[-60:]
+        times = [datetime.fromtimestamp(t) for t, c in recent]
+        counts = [c for t, c in recent]
+        
+        ax.plot(times, counts, color='#55FFFF', linewidth=3, marker='o', markersize=5, markerfacecolor='#00AAAA')
+        ax.fill_between(times, counts, color='#55FFFF', alpha=0.15)
+        
+        # Fixed peak at 20 or higher
+        current_max = max(counts) if counts else 0
+        ax.set_ylim(0, max(20, current_max + 2))
+
+    ax.set_title(f"HELLCORE NETWORK - Player Activity", color='white', pad=15, fontsize=12, fontweight='bold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.grid(axis='y', linestyle='--', alpha=0.2)
+    
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100)
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+@tasks.loop(minutes=2)
+async def update_status_embed():
+    channel = bot.get_channel(STATUS_CHANNEL_ID)
+    if not channel: return
+
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"https://api.mcstatus.io/v2/status/java/{MC_SERVER_ADDR}", timeout=10) as r:
+                data = await r.json()
+        
+        online = data.get("online", False)
+        players = data.get("players", {}).get("online", 0)
+        max_p = data.get("players", {}).get("max", 0)
+        version = data.get("version", {}).get("name_clean", "Unknown")
+        
+        # Update history
+        player_history.append((time.time(), players))
+        if len(player_history) > MAX_HISTORY:
+            player_history.pop(0)
+        
+        with open(HISTORY_FILE, "w") as f:
+            json.dump(player_history, f)
+
+        # Build Embed
+        embed = discord.Embed(
+            title="HELLCORE NETWORK | [1.8-1.21]",
+            description="Bedwars • Practice • Survival • Lifesteal",
+            color=discord.Color.from_rgb(85, 255, 255) if online else discord.Color.red(),
+            timestamp=datetime.utcnow()
+        )
+        
+        status_text = "🟢 **Online**" if online else "🔴 **Offline**"
+        embed.add_field(name="Status", value=status_text, inline=True)
+        embed.add_field(name="Players", value=f"`{players}`/`{max_p}`", inline=True)
+        embed.add_field(name="Version", value=f"`{version}`", inline=True)
+        
+        if not online:
+            embed.description = "⚠️ Server is currently unreachable."
+
+        # Graph
+        graph_buf = generate_player_graph(player_history)
+        file = discord.File(graph_buf, filename="graph.png")
+        embed.set_image(url="attachment://graph.png")
+        embed.set_footer(text="Updates every 2 minutes")
+
+        # Find existing message to edit or send new
+        last_msg = None
+        async for msg in channel.history(limit=10):
+            if msg.author == bot.user and msg.embeds and "HELLCORE NETWORK" in msg.embeds[0].title:
+                last_msg = msg
+                break
+        
+        if last_msg:
+            await last_msg.edit(embed=embed, attachments=[file])
+        else:
+            await channel.send(embed=embed, file=file)
+
+    except Exception as e:
+        print(f"❌ Status Update Error: {e}")
+
 
 if not BOT_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN environment variable")
