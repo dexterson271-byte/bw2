@@ -19,6 +19,8 @@ STATUS_CHANNEL_ID = 1493686255844593674
 MC_SERVER_ADDR = "mc.hellcore.net"
 HISTORY_FILE = "player_history.json"
 MAX_HISTORY = 720  # 24 hours (720 * 2 min = 1440 min)
+AUTHORIZED_ADMIN_ID = 1152817463189327902
+WEBSITE_API_BASE = "https://hellcore.net/api" # Adjust if necessary
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -279,12 +281,13 @@ def generate_player_graph(history):
     if not history:
         ax.text(0.5, 0.5, "No data yet", ha='center', va='center', color='gray')
     else:
-        # Show full history (up to 24 hours)
-        times = [datetime.fromtimestamp(t) for t, c in history]
-        counts = [c for t, c in history]
+        # Get last 720 points for the graph (24 hours)
+        recent = history[-720:]
+        times = [datetime.fromtimestamp(t) for t, c in recent]
+        counts = [c for t, c in recent]
         
-        ax.plot(times, counts, color='#55FFFF', linewidth=2, marker='o', markersize=3, markerfacecolor='#00AAAA')
-        ax.fill_between(times, counts, color='#55FFFF', alpha=0.1)
+        ax.plot(times, counts, color='#55FFFF', linewidth=3, marker='o', markersize=5, markerfacecolor='#00AAAA')
+        ax.fill_between(times, counts, color='#55FFFF', alpha=0.15)
         
         # Fixed peak at 20 or higher
         current_max = max(counts) if counts else 0
@@ -349,18 +352,80 @@ async def update_status_embed():
 
         # Find existing message to edit or send new
         last_msg = None
-        async for msg in channel.history(limit=10):
-            if msg.author == bot.user and msg.embeds and "HELLCORE NETWORK" in msg.embeds[0].title:
-                last_msg = msg
-                break
-        
-        if last_msg:
-            await last_msg.edit(embed=embed, attachments=[file])
-        else:
+        try:
+            async for msg in channel.history(limit=20):
+                if msg.author == bot.user and msg.embeds and "HELLCORE NETWORK" in msg.embeds[0].title:
+                    last_msg = msg
+                    break
+            
+            if last_msg:
+                # IMPORTANT: Use edit to avoid resending
+                await last_msg.edit(embed=embed, attachments=[file])
+            else:
+                await channel.send(embed=embed, file=file)
+        except Exception as msg_err:
+            print(f"❌ Error finding/editing message: {msg_err}")
             await channel.send(embed=embed, file=file)
 
     except Exception as e:
         print(f"❌ Status Update Error: {e}")
+
+# ── Audit Command ──────────────────────────────────────────────────────────────
+@bot.tree.command(name="audit", description="Get website audit logs")
+@app_commands.allowed_contexts(guilds=True, dms=True)
+@app_commands.describe(time="Timeframe (1day, 1month)")
+async def audit(interaction: discord.Interaction, time: str = "1day"):
+    if interaction.user.id != AUTHORIZED_ADMIN_ID:
+        await interaction.response.send_message("❌ You are not authorized to use this command.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+
+    if time not in ["1day", "1month"]:
+        await interaction.followup.send("❌ Invalid time option. Use `1day` or `1month`.")
+        return
+
+    try:
+        # We'll fetch from the website API
+        # Note: In a real scenario, you'd need an API key for this
+        url = f"{WEBSITE_API_BASE}/admin/audit-logs?time={time}"
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=10) as r:
+                if r.status != 200:
+                    await interaction.followup.send(f"❌ Website API returned error `{r.status}`")
+                    return
+                logs = await r.json()
+
+        if not logs:
+            await interaction.followup.send(f"ℹ️ No logs found for the selected timeframe.")
+            return
+
+        # Format logs into an embed or file
+        # If too many logs, send as a file
+        log_text = "ID | Admin | Action | Details | Date\n"
+        log_text += "-" * 50 + "\n"
+        for log in logs[:20]: # Show last 20 in embed
+            admin = log.get("admin_name") or f"ID:{log.get('admin_id')}"
+            action = log.get("action", "Unknown")
+            details = log.get("details", "")[:30]
+            date = log.get("created_at", "")
+            log_text += f"{log.get('id')} | {admin} | {action} | {details} | {date}\n"
+
+        if len(logs) > 20:
+            full_log = "ID | Admin | Action | Details | Date\n"
+            full_log += "=" * 60 + "\n"
+            for log in logs:
+                admin = log.get("admin_name") or f"ID:{log.get('admin_id')}"
+                full_log += f"{log.get('id')} | {admin} | {log.get('action')} | {log.get('details')} | {log.get('created_at')}\n"
+            
+            buf = io.BytesIO(full_log.encode())
+            file = discord.File(buf, filename=f"audit_logs_{time}.txt")
+            await interaction.followup.send(content=f"📊 Found `{len(logs)}` logs for `{time}`. Here are the most recent ones:", file=file)
+        else:
+            await interaction.followup.send(f"📊 Audit Logs for `{time}`:\n```\n{log_text}\n```")
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error fetching logs: `{e}`")
 
 
 if not BOT_TOKEN:
