@@ -16,7 +16,7 @@ BOT_TOKEN = os.getenv("DISCORD_TOKEN")
 ALL_MODES = ["Overall", "Solo", "Doubles", "4v4", "1v1", "4v4v4v4"]
 START_TIME = time.time()
 STATUS_CHANNEL_ID = 1493686255844593674
-MC_SERVER_ADDR = "mc.hellcore.com"
+MC_SERVER_ADDR = "mc.hellcore.net"
 HISTORY_FILE = "player_history.json"
 MAX_HISTORY = 720  # 24 hours (720 * 2 min = 1440 min)
 
@@ -279,13 +279,12 @@ def generate_player_graph(history):
     if not history:
         ax.text(0.5, 0.5, "No data yet", ha='center', va='center', color='gray')
     else:
-        # Get last 60 points for the graph (2 hours)
-        recent = history[-60:]
-        times = [datetime.fromtimestamp(t) for t, c in recent]
-        counts = [c for t, c in recent]
+        # Show full history (up to 24 hours)
+        times = [datetime.fromtimestamp(t) for t, c in history]
+        counts = [c for t, c in history]
         
-        ax.plot(times, counts, color='#55FFFF', linewidth=3, marker='o', markersize=5, markerfacecolor='#00AAAA')
-        ax.fill_between(times, counts, color='#55FFFF', alpha=0.15)
+        ax.plot(times, counts, color='#55FFFF', linewidth=2, marker='o', markersize=3, markerfacecolor='#00AAAA')
+        ax.fill_between(times, counts, color='#55FFFF', alpha=0.1)
         
         # Fixed peak at 20 or higher
         current_max = max(counts) if counts else 0
