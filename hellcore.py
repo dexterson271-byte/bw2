@@ -21,6 +21,7 @@ HISTORY_FILE = "player_history.json"
 MAX_HISTORY = 720  # 24 hours (720 * 2 min = 1440 min)
 AUTHORIZED_ADMIN_ID = 1152817463189327902
 WEBSITE_API_BASE = "https://hellcore.net/api" # Adjust if necessary
+WEBSITE_API_KEY  = os.getenv("WEBSITE_API_KEY", "hellcore_secret_key")
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -389,8 +390,9 @@ async def audit(interaction: discord.Interaction, time: str = "1day"):
         # We'll fetch from the website API
         # Note: In a real scenario, you'd need an API key for this
         url = f"{WEBSITE_API_BASE}/admin/audit-logs?time={time}"
+        headers = {"X-API-Key": WEBSITE_API_KEY}
         async with aiohttp.ClientSession() as s:
-            async with s.get(url, timeout=10) as r:
+            async with s.get(url, headers=headers, timeout=10) as r:
                 if r.status != 200:
                     await interaction.followup.send(f"❌ Website API returned error `{r.status}`")
                     return
