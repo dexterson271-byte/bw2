@@ -20,8 +20,9 @@ MC_SERVER_ADDR = "mc.hellcore.net"
 HISTORY_FILE = "player_history.json"
 MAX_HISTORY = 720  # 24 hours (720 * 2 min = 1440 min)
 AUTHORIZED_ADMIN_ID = 1152817463189327902
-WEBSITE_API_BASE = "https://hellcore.net/api" # Adjust if necessary
+WEBSITE_API_BASE = os.getenv("WEBSITE_API_BASE", "https://hellcore.net/api")
 WEBSITE_API_KEY  = os.getenv("WEBSITE_API_KEY", "hellcore_secret_key")
+HC_BOT_SECRET    = os.getenv("HC_BOT_SECRET", "hellcore-secret-123")
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -266,6 +267,7 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user}")
     print("✅ Commands synced")
     update_status_embed.start()
+    sync_ranks_task.start()
 
 # ── Status Task ────────────────────────────────────────────────────────────────
 player_history = []
@@ -428,6 +430,146 @@ async def audit(interaction: discord.Interaction, time: str = "1day"):
 
     except Exception as e:
         await interaction.followup.send(f"❌ Error fetching logs: `{e}`")
+
+# ── Admin Commands ─────────────────────────────────────────────────────────────
+@bot.tree.command(name="force_sync", description="Force a rank sync for all users (Admin)")
+@app_commands.allowed_contexts(guilds=True, dms=True)
+async def force_sync(interaction: discord.Interaction):
+    if interaction.user.id != AUTHORIZED_ADMIN_ID:
+        await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    await sync_ranks_task()
+    await interaction.followup.send("✅ Rank sync triggered!", ephemeral=True)
+
+@bot.tree.command(name="unlink", description="Unlink a Discord user from their website account (Admin)")
+@app_commands.allowed_contexts(guilds=True, dms=True)
+@app_commands.describe(member="The Discord member to unlink")
+async def unlink(interaction: discord.Interaction, member: discord.Member):
+    if interaction.user.id != AUTHORIZED_ADMIN_ID:
+        await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        headers = {"X-Bot-Secret": HC_BOT_SECRET}
+        # We need an endpoint to unlink or just use a specific bot API
+        # For now I'll assume we can use bot_verify with empty/null logic or add a new endpoint
+        # Let's add an unlink endpoint to app.py too
+        async with aiohttp.ClientSession() as session:
+            payload = {"discord_id": str(member.id)}
+            async with session.post(f"{WEBSITE_API_BASE}/bot/unlink", json=payload, headers=headers) as resp:
+                if resp.status == 200:
+                    await interaction.followup.send(f"✅ Successfully unlinked {member.mention}.", ephemeral=True)
+                else:
+                    await interaction.followup.send(f"❌ Error unlinking: {resp.status}", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+@bot.tree.command(name="userinfo", description="Check linked account info for a Discord member (Admin)")
+@app_commands.allowed_contexts(guilds=True, dms=True)
+@app_commands.describe(member="The Discord member to check")
+async def userinfo(interaction: discord.Interaction, member: discord.Member):
+    if interaction.user.id != AUTHORIZED_ADMIN_ID:
+        await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        headers = {"X-Bot-Secret": HC_BOT_SECRET}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{WEBSITE_API_BASE}/bot/ranks", headers=headers) as resp:
+                users_data = await resp.json()
+                
+        user_info = next((u for u in users_data if u["discord_id"] == str(member.id)), None)
+        
+        if not user_info:
+            await interaction.followup.send(f"❌ {member.mention} is not linked to any Hellcore account.", ephemeral=True)
+            return
+            
+        embed = discord.Embed(title=f"User Info: {user_info['username']}", color=discord.Color.blue())
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Discord", value=member.mention, inline=True)
+        embed.add_field(name="Website Username", value=user_info["username"], inline=True)
+        
+        ranks = user_info.get("ranks", {})
+        if ranks:
+            rank_text = "\n".join([f"**{gm}**: {r}" for gm, r in ranks.items()])
+            embed.add_field(name="Ranks", value=rank_text, inline=False)
+        else:
+            embed.add_field(name="Ranks", value="None", inline=False)
+            
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+# ── Rank Sync Task ─────────────────────────────────────────────────────────────
+@tasks.loop(minutes=5)
+async def sync_ranks_task():
+    """Sync Minecraft ranks to Discord roles."""
+    print("🔄 Syncing ranks...")
+    try:
+        headers = {"X-Bot-Secret": HC_BOT_SECRET}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{WEBSITE_API_BASE}/bot/ranks", headers=headers) as resp:
+                if resp.status != 200:
+                    print(f"❌ Failed to fetch ranks: {resp.status}")
+                    return
+                users_data = await resp.json()
+
+        for guild in bot.guilds:
+            roles_map = {role.name.lower(): role for role in guild.roles}
+            target_ranks = ["vip", "vip+", "mvp", "mvp+", "mvp++", "bronze", "silver", "gold"]
+            priority = ["mvp++", "mvp+", "mvp", "vip+", "vip", "gold", "silver", "bronze"]
+
+            for user_info in users_data:
+                discord_id = user_info.get("discord_id")
+                if not discord_id: continue
+                
+                member = guild.get_member(int(discord_id))
+                if not member: continue
+
+                user_ranks = [r.lower() for r in user_info.get("ranks", {}).values()]
+                primary_rank = "default"
+                for p in priority:
+                    if p in user_ranks:
+                        primary_rank = p
+                        break
+                
+                try:
+                    roles_to_add = []
+                    roles_to_remove = []
+                    for r_name in target_ranks:
+                        role = roles_map.get(r_name)
+                        if not role: continue
+                        if r_name == primary_rank:
+                            if role not in member.roles: roles_to_add.append(role)
+                        else:
+                            if role in member.roles: roles_to_remove.append(role)
+                    
+                    if roles_to_remove: await member.remove_roles(*roles_to_remove)
+                    if roles_to_add: await member.add_roles(*roles_to_add)
+                except Exception as e:
+                    print(f"❌ Failed to update roles for {member.name}: {e}")
+    except Exception as e:
+        print(f"❌ Rank sync error: {e}")
+
+# ── Verify Command ─────────────────────────────────────────────────────────────
+@bot.tree.command(name="verify", description="Link your account to the website")
+@app_commands.describe(code="6-digit code from /verify on the website")
+async def verify(interaction: discord.Interaction, code: str):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        headers = {"X-Bot-Secret": HC_BOT_SECRET}
+        payload = {"code": code, "discord_id": str(interaction.user.id)}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{WEBSITE_API_BASE}/bot/verify", json=payload, headers=headers) as resp:
+                data = await resp.json()
+                if resp.status == 200:
+                    await interaction.followup.send(f"✅ Linked to **{data['username']}**!", ephemeral=True)
+                    sync_ranks_task.restart()
+                else:
+                    await interaction.followup.send(f"❌ Error: {data.get('error', 'Unknown')}", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Verification error: {e}", ephemeral=True)
 
 
 if not BOT_TOKEN:
