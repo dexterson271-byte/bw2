@@ -384,7 +384,8 @@ async def update_status_embed():
         embed = discord.Embed(
             title="💎 HELLCORE NETWORK | SERVER STATUS",
             description=(
-                "**Bedwars • Practice • Survival • Lifesteal**\n"
+                "**Official Ranked Bedwars Server**\n"
+                "**IP:** `mc.hellcore.net`\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             ),
             color=discord.Color.from_rgb(85, 255, 255) if online else discord.Color.red(),
@@ -613,11 +614,10 @@ async def on_member_join(member):
     if not channel: return
 
     embed = discord.Embed(
-        title="✨ A NEW SOUL HAS ARRIVED! ✨",
+        title="Welcome to Hellcore rbw",
         description=(
-            f"Welcome {member.mention} to the **HellCore Network**!\n\n"
-            "We're thrilled to have you here. Before you jump into the game, "
-            "make sure to check out our rules and get verified!"
+            f"🔥 **Welcome to the pits of hell, {member.mention}!** 🔥\n"
+            "Check out <#1504191090905841717> and <#1504153029627219988> to get started."
         ),
         color=discord.Color.from_rgb(85, 255, 255),
         timestamp=discord.utils.utcnow()
@@ -640,10 +640,7 @@ async def on_member_join(member):
     footer_text = f"Welcome to Hell, {member.name}! | Enjoy your stay"
     embed.set_footer(text=footer_text, icon_url=member.guild.icon.url if member.guild.icon else None)
 
-    welcome_msg = (
-        f"🔥 **Welcome to the pits of hell, {member.mention}!** 🔥\n"
-        "Check out <#1504191090905841717> and <#1504153029627219988> to get started."
-    )
+    welcome_msg = f"🔥 **Welcome to the pits of hell, {member.mention}!** 🔥"
     await channel.send(content=welcome_msg, embed=embed)
 
 # ── Rules Posting Commands ─────────────────────────────────────────────────────
