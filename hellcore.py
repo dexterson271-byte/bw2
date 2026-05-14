@@ -640,8 +640,7 @@ async def on_member_join(member):
     footer_text = f"Welcome to Hell, {member.name}! | Enjoy your stay"
     embed.set_footer(text=footer_text, icon_url=member.guild.icon.url if member.guild.icon else None)
 
-    welcome_msg = f"🔥 **Welcome to the pits of hell, {member.mention}!** 🔥"
-    await channel.send(content=welcome_msg, embed=embed)
+    await channel.send(content=member.mention, embed=embed)
 
 # ── Rules Posting Commands ─────────────────────────────────────────────────────
 @bot.tree.command(name="post_game_rules", description="Post the BedWars game rules embed")
