@@ -15,16 +15,23 @@ API_KEY   = os.getenv("API_KEY", "")
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
 ALL_MODES = ["Overall", "Solo", "Doubles", "4v4", "1v1", "4v4v4v4"]
 START_TIME = time.time()
-STATUS_CHANNEL_ID = 1493686255844593674
+
+# Channel IDs
+STATUS_CHANNEL_ID  = int(os.getenv("STATUS_CHANNEL_ID", 1504153522986418246))
+RULES_CHANNEL_ID   = int(os.getenv("RULES_CHANNEL_ID", 1504191090905841717))
+INFO_CHANNEL_ID    = int(os.getenv("INFO_CHANNEL_ID", 1504153029627219988))
+WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", 1504153378593181726))
+
 MC_SERVER_ADDR = "mc.hellcore.net"
 HISTORY_FILE = "player_history.json"
 MAX_HISTORY = 720  # 24 hours (720 * 2 min = 1440 min)
-AUTHORIZED_ADMIN_ID = 1152817463189327902
+AUTHORIZED_ADMIN_ID = int(os.getenv("AUTHORIZED_ADMIN_ID", 1152817463189327902))
 WEBSITE_API_BASE = os.getenv("WEBSITE_API_BASE", "https://hellcore.net/api")
 WEBSITE_API_KEY  = os.getenv("WEBSITE_API_KEY", "hellcore_secret_key")
 HC_BOT_SECRET    = os.getenv("HC_BOT_SECRET", "hellcore-secret-123")
 
 intents = discord.Intents.default()
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ── API ────────────────────────────────────────────────────────────────────────
@@ -259,11 +266,53 @@ async def uses(interaction: discord.Interaction):
 
     await interaction.followup.send(embed=embed)
 
+@bot.tree.command(name="help", description="Show all available commands")
+async def help_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📖 HELLCORE BOT | COMMAND HELP",
+        description="Here is a list of all commands you can use with the HellCore Bot.",
+        color=discord.Color.from_rgb(85, 255, 255)
+    )
+    
+    embed.add_field(
+        name="🎮 BedWars Stats",
+        value=(
+            "`/bedwars <username> [table]` - Look up a player's stats.\n"
+            "`/verify <code>` - Link your Minecraft account."
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📊 Server Info",
+        value=(
+            "`/uses` - Show bot server resource usage.\n"
+            "`/userinfo <member>` - Check linked account info (Admin)."
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🛠️ Management",
+        value=(
+            "`/post_game_rules` - Post BedWars rules (Admin).\n"
+            "`/post_server_rules` - Post server rules (Admin).\n"
+            "`/audit <time>` - Fetch website audit logs (Admin).\n"
+            "`/force_sync` - Force a rank sync (Admin).\n"
+            "`/unlink <member>` - Unlink a user (Admin)."
+        ),
+        inline=False
+    )
+    
+    embed.set_footer(text="HellCore Network | Need more help? Ask a staff member.")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 # ── Startup ────────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
     await bot.tree.sync()
+    await bot.change_presence(activity=discord.Game(name="mc.hellcore.net"))
     print(f"✅ Logged in as {bot.user}")
     print("✅ Commands synced")
     update_status_embed.start()
@@ -333,25 +382,30 @@ async def update_status_embed():
 
         # Build Embed
         embed = discord.Embed(
-            title="HELLCORE NETWORK | [1.8-1.21]",
-            description="Bedwars • Practice • Survival • Lifesteal",
+            title="💎 HELLCORE NETWORK | SERVER STATUS",
+            description=(
+                "**Bedwars • Practice • Survival • Lifesteal**\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            ),
             color=discord.Color.from_rgb(85, 255, 255) if online else discord.Color.red(),
-            timestamp=datetime.utcnow()
+            timestamp=discord.utils.utcnow()
         )
         
-        status_text = "🟢 **Online**" if online else "🔴 **Offline**"
-        embed.add_field(name="Status", value=status_text, inline=True)
-        embed.add_field(name="Players", value=f"`{players}`/`{max_p}`", inline=True)
-        embed.add_field(name="Version", value=f"`{version}`", inline=True)
+        status_icon = "🟢" if online else "🔴"
+        status_text = "Online" if online else "Offline"
+        
+        embed.add_field(name="📶 STATUS", value=f"{status_icon} **{status_text}**", inline=True)
+        embed.add_field(name="👥 PLAYERS", value=f"❯ `{players}` / `{max_p}`", inline=True)
+        embed.add_field(name="🛠️ VERSION", value=f"❯ `1.8 - 1.21`", inline=True)
         
         if not online:
-            embed.description = "⚠️ Server is currently unreachable."
+            embed.description = "⚠️ **Server is currently unreachable.**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
         # Graph
         graph_buf = generate_player_graph(player_history)
         file = discord.File(graph_buf, filename="graph.png")
         embed.set_image(url="attachment://graph.png")
-        embed.set_footer(text="Updates every 2 minutes")
+        embed.set_footer(text="Updates every 2 minutes • mc.hellcore.net")
 
         # Find existing message to edit or send new
         last_msg = None
@@ -551,6 +605,153 @@ async def sync_ranks_task():
                     print(f"❌ Failed to update roles for {member.name}: {e}")
     except Exception as e:
         print(f"❌ Rank sync error: {e}")
+
+# ── Welcome Event ──────────────────────────────────────────────────────────────
+@bot.event
+async def on_member_join(member):
+    channel = bot.get_channel(WELCOME_CHANNEL_ID)
+    if not channel: return
+
+    embed = discord.Embed(
+        title="✨ A NEW SOUL HAS ARRIVED! ✨",
+        description=(
+            f"Welcome {member.mention} to the **HellCore Network**!\n\n"
+            "We're thrilled to have you here. Before you jump into the game, "
+            "make sure to check out our rules and get verified!"
+        ),
+        color=discord.Color.from_rgb(85, 255, 255),
+        timestamp=discord.utils.utcnow()
+    )
+    
+    embed.add_field(
+        name="👤 User Profile",
+        value=f"**Name:** {member.name}\n**ID:** `{member.id}`",
+        inline=True
+    )
+    embed.add_field(
+        name="📈 Community",
+        value=f"**Member Count:** `{member.guild.member_count}`",
+        inline=True
+    )
+    
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.set_image(url="https://media.discordapp.net/attachments/1503736831043174411/1504434667556962395/rbw.gif")
+    
+    footer_text = f"Welcome to Hell, {member.name}! | Enjoy your stay"
+    embed.set_footer(text=footer_text, icon_url=member.guild.icon.url if member.guild.icon else None)
+
+    welcome_msg = (
+        f"🔥 **Welcome to the pits of hell, {member.mention}!** 🔥\n"
+        "Check out <#1504191090905841717> and <#1504153029627219988> to get started."
+    )
+    await channel.send(content=welcome_msg, embed=embed)
+
+# ── Rules Posting Commands ─────────────────────────────────────────────────────
+@bot.tree.command(name="post_game_rules", description="Post the BedWars game rules embed")
+async def post_game_rules(interaction: discord.Interaction):
+    if interaction.user.id != AUTHORIZED_ADMIN_ID:
+        await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+        return
+    
+    await interaction.response.defer(thinking=True)
+
+    banner_url = "https://media.discordapp.net/attachments/1503736831043174411/1504434667556962395/rbw.gif"
+
+    embed = discord.Embed(
+        title="⚔️ HELLCORE BEDWARS | OFFICIAL GAME RULES",
+        description=(
+            "To maintain a fun and fair environment, all players are expected to follow the guidelines below.\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        ),
+        color=discord.Color.from_rgb(85, 255, 255)
+    )
+    embed.set_image(url=banner_url)
+
+    embed.add_field(
+        name="🔹 ALLOWED (ALL GAME)",
+        value=(
+            "❯ 🪜 **Ladders**\n"
+            "❯ 💠 **Blue Side Island**\n"
+            "❯ 🛡️ **Diamond Armor**\n"
+            "❯ 🗡️ **Diamond Sword**\n"
+            "❯ 🌊 **Water** (At own base only)"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔹 ALLOWED (AFTER EMERALD II 💚)",
+        value=(
+            "❯ 🧪 **Invis Potion**\n"
+            "❯ 🧪 **Jump Potion**\n"
+            "❯ 🧪 **Speed Potion**\n"
+            "❯ 🥚 **Bridge Eggs**"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔹 ALLOWED (AFTER BED BREAK 🛏️)",
+        value=(
+            "❯ 🌊 **Water** (Everywhere)\n"
+            "❯ 🟢 **Pearls**\n"
+            "❯ 🟨 **Yellow Side Island**\n"
+            "❯ 🏒 **Knockback Sticks**"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔹 STRICTLY PROHIBITED ❌",
+        value=(
+            "❯ 🔥 **Fireballing Diamonds**\n"
+            "❯ ⬛ **Obsidian**\n"
+            "❯ 🏹 **Bows**\n"
+            "❯ 📦 **Pop-Up Towers**"
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text="HellCore Network | Play Fair", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+    
+    await interaction.followup.send("✅ Rules embed posted!", ephemeral=True)
+    await interaction.channel.send(embed=embed)
+
+@bot.tree.command(name="post_server_rules", description="Post the general server rules embed")
+async def post_server_rules(interaction: discord.Interaction):
+    if interaction.user.id != AUTHORIZED_ADMIN_ID:
+        await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+        return
+    
+    await interaction.response.defer(thinking=True)
+
+    embed = discord.Embed(
+        title="📜 HELLCORE NETWORK | SERVER RULES",
+        description=(
+            "Respect our community and follow the rules to avoid sanctions.\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        ),
+        color=discord.Color.from_rgb(255, 85, 85)
+    )
+
+    rules = [
+        "**1.** No disrespect or harassing others.",
+        "**2.** Avoid any form of disrespectful behavior.",
+        "**3.** No spamming in any channel.",
+        "**4.** No advertising (except in designated areas).",
+        "**5.** Do not send harmful or malicious links.",
+        "**6.** Do **NOT** attempt to bribe staff members.",
+        "**7.** Do not impersonate other users or staff.",
+        "**8.** Avoid leaking private or sensitive information.",
+        "**9.** No hacking or using unauthorized clients. (Strong Anti-Cheat in place)"
+    ]
+
+    embed.add_field(name="📋 RULES LIST", value="\n".join([f"❯ {r}" for r in rules]), inline=False)
+    
+    embed.set_footer(text="HellCore Network © 2026 | Safety First", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+    
+    await interaction.followup.send("✅ Server rules embed posted!", ephemeral=True)
+    await interaction.channel.send(embed=embed)
 
 # ── Verify Command ─────────────────────────────────────────────────────────────
 @bot.tree.command(name="verify", description="Link your account to the website")
