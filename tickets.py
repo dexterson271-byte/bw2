@@ -193,10 +193,12 @@ def register_ticket_commands(bot, authorized_admin_id: int):
         await interaction.response.defer(ephemeral=True, thinking=True)
         await ensure_staff_role(guild)
         await ensure_log_channel(guild)
-        try:
-            await post_ticket_panel(channel, config)
-        except FileNotFoundError as exc:
-            await interaction.followup.send(str(exc), ephemeral=True)
+        panel_has_banner = await post_ticket_panel(channel, config)
+        if not panel_has_banner:
+            await interaction.followup.send(
+                f"Posted {config.title} panel in {channel.mention}. Banner file is missing, so the panel was sent without an image.",
+                ephemeral=True,
+            )
             return
         await interaction.followup.send(f"Posted {config.title} panel in {channel.mention}.", ephemeral=True)
 
@@ -223,25 +225,28 @@ async def post_all_ticket_panels(bot) -> int:
         if guild and isinstance(channel, discord.TextChannel):
             await ensure_staff_role(guild)
             await ensure_log_channel(guild)
-            try:
-                await post_ticket_panel(channel, config)
-                count += 1
-            except FileNotFoundError as exc:
-                print(exc)
+            panel_has_banner = await post_ticket_panel(channel, config)
+            if not panel_has_banner:
+                print(f"Ticket banner image is missing: {resolve_banner_path()}")
+            count += 1
     return count
 
 
-async def post_ticket_panel(channel: discord.TextChannel, config: TicketPanelConfig):
+async def post_ticket_panel(channel: discord.TextChannel, config: TicketPanelConfig) -> bool:
     banner = load_banner_file()
-    file = discord.File(banner, filename=f"{config.key}_ticket_panel.png")
-    embed = build_panel_embed(config)
+    file = discord.File(banner, filename=f"{config.key}_ticket_panel.png") if banner else None
+    embed = build_panel_embed(config, has_banner=file is not None)
     view = TicketPanelView(config)
     existing = await find_existing_panel_message(channel, config)
 
     if existing:
-        await existing.edit(embed=embed, attachments=[file], view=view)
+        await existing.edit(embed=embed, attachments=[file] if file else [], view=view)
     else:
-        await channel.send(embed=embed, file=file, view=view, allowed_mentions=no_everyone_mentions())
+        if file:
+            await channel.send(embed=embed, file=file, view=view, allowed_mentions=no_everyone_mentions())
+        else:
+            await channel.send(embed=embed, view=view, allowed_mentions=no_everyone_mentions())
+    return file is not None
 
 
 async def find_existing_panel_message(channel: discord.TextChannel, config: TicketPanelConfig):
@@ -254,25 +259,31 @@ async def find_existing_panel_message(channel: discord.TextChannel, config: Tick
     return None
 
 
-def build_panel_embed(config: TicketPanelConfig) -> discord.Embed:
+def build_panel_embed(config: TicketPanelConfig, has_banner: bool) -> discord.Embed:
     embed = discord.Embed(
         title=config.title,
         description=PANEL_RULES,
         color=PANEL_COLOR,
     )
-    embed.set_image(url=f"attachment://{config.key}_ticket_panel.png")
+    if has_banner:
+        embed.set_image(url=f"attachment://{config.key}_ticket_panel.png")
     for ticket_type in config.ticket_types:
         embed.add_field(name=ticket_type.label, value=ticket_type.description, inline=True)
     embed.set_footer(text=f"Ticket Panel: {config.key}")
     return embed
 
 
-def load_banner_file() -> io.BytesIO:
+def resolve_banner_path() -> Path:
     path = BANNER_IMAGE_PATH
     if not path.is_absolute():
-        path = Path(__file__).parent / path
+        return Path(__file__).parent / path
+    return path
+
+
+def load_banner_file() -> io.BytesIO | None:
+    path = resolve_banner_path()
     if not path.exists():
-        raise FileNotFoundError(f"Missing ticket banner image: {path}")
+        return None
     return io.BytesIO(path.read_bytes())
 
 
