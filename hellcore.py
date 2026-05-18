@@ -8,6 +8,7 @@ from datetime import datetime
 from discord.ext import tasks
 
 from card import build_card
+from tickets import post_all_ticket_panels, register_persistent_ticket_views, setup_ticket_system
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 API_BASE  = os.getenv("API_BASE", "http://srv125.godlike.club:26045/api/v1/player/")
@@ -33,6 +34,7 @@ HC_BOT_SECRET    = os.getenv("HC_BOT_SECRET", "hellcore-secret-123")
 intents = discord.Intents.default()
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+setup_ticket_system(bot, AUTHORIZED_ADMIN_ID)
 
 # ── API ────────────────────────────────────────────────────────────────────────
 async def fetch_player(username: str) -> dict:
@@ -311,12 +313,17 @@ async def help_command(interaction: discord.Interaction):
 # ── Startup ────────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
+    register_persistent_ticket_views(bot)
     await bot.tree.sync()
     await bot.change_presence(activity=discord.Game(name="mc.hellcore.net"))
     print(f"✅ Logged in as {bot.user}")
     print("✅ Commands synced")
-    update_status_embed.start()
-    sync_ranks_task.start()
+    posted_panels = await post_all_ticket_panels(bot)
+    print(f"Ticket panels refreshed: {posted_panels}")
+    if not update_status_embed.is_running():
+        update_status_embed.start()
+    if not sync_ranks_task.is_running():
+        sync_ranks_task.start()
 
 # ── Status Task ────────────────────────────────────────────────────────────────
 player_history = []
