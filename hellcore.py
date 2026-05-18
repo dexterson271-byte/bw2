@@ -33,6 +33,7 @@ HC_BOT_SECRET    = os.getenv("HC_BOT_SECRET", "hellcore-secret-123")
 
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 setup_ticket_system(bot, AUTHORIZED_ADMIN_ID)
 
