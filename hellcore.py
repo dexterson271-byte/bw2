@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import aiohttp, os, platform, time, io, json
+import aiohttp, asyncio, os, platform, time, io, json, re, posixpath
 import psutil
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -9,6 +9,19 @@ from discord.ext import tasks
 
 from card import build_card
 from tickets import post_all_ticket_panels, register_persistent_ticket_views, setup_ticket_system
+
+def _load_local_env(path: str = ".env"):
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+_load_local_env()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 API_BASE  = os.getenv("API_BASE", "http://srv125.godlike.club:26045/api/v1/player/")
@@ -30,6 +43,21 @@ AUTHORIZED_ADMIN_ID = int(os.getenv("AUTHORIZED_ADMIN_ID", 1152817463189327902))
 WEBSITE_API_BASE = os.getenv("WEBSITE_API_BASE", "https://hellcore.net/api")
 WEBSITE_API_KEY  = os.getenv("WEBSITE_API_KEY", "hellcore_secret_key")
 HC_BOT_SECRET    = os.getenv("HC_BOT_SECRET", "hellcore-secret-123")
+GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL     = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+AI_SSH_HOST      = os.getenv("AI_SSH_HOST", "147.93.30.8")
+AI_SSH_USER      = os.getenv("AI_SSH_USER", "root")
+AI_SSH_PASSWORD  = os.getenv("AI_SSH_PASSWORD", "")
+AI_REMOTE_ROOT   = os.getenv("AI_REMOTE_ROOT", "/var/lib/pterodactyl/volumes/22fe458f-52a9-45cf-b21a-4b10990f95a4")
+AI_BACKUP_DIR    = os.getenv("AI_BACKUP_DIR", ".hc_ai_backups/latest")
+AI_ALLOWED_PREFIXES = tuple(
+    p.strip().strip("/") + "/"
+    for p in os.getenv("AI_ALLOWED_PREFIXES", "panel/").split(",")
+    if p.strip()
+)
+AI_MAX_PROMPT_CHARS = int(os.getenv("AI_MAX_PROMPT_CHARS", "1600"))
+AI_MAX_FILE_CHARS   = int(os.getenv("AI_MAX_FILE_CHARS", "80000"))
+AI_MAX_TOTAL_CHARS  = int(os.getenv("AI_MAX_TOTAL_CHARS", "180000"))
 
 intents = discord.Intents.default()
 intents.members = True
@@ -184,6 +212,277 @@ class StatsView(discord.ui.View):
         for item in self.children:
             item.disabled = True
 
+def _ai_is_admin(interaction: discord.Interaction) -> bool:
+    return interaction.user.id == AUTHORIZED_ADMIN_ID
+
+def _ai_clean_path(path: str) -> str:
+    path = (path or "").strip().replace("\\", "/").lstrip("/")
+    norm = posixpath.normpath(path)
+    if norm in ("", ".") or norm.startswith("../") or norm == ".." or "\x00" in norm:
+        raise ValueError(f"Unsafe path: {path}")
+    if not any(norm.startswith(prefix) for prefix in AI_ALLOWED_PREFIXES):
+        allowed = ", ".join(AI_ALLOWED_PREFIXES)
+        raise ValueError(f"Path `{norm}` is outside allowed prefixes: {allowed}")
+    return norm
+
+def _ai_remote_path(path: str) -> str:
+    return posixpath.join(AI_REMOTE_ROOT.rstrip("/"), _ai_clean_path(path))
+
+def _ai_extract_json(text: str) -> dict:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        return json.loads(text[start:end + 1])
+
+async def _gemini_json(prompt: str) -> dict:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("Missing GEMINI_API_KEY")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.2,
+            "responseMimeType": "application/json",
+        },
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY,
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+            data = await resp.json(content_type=None)
+            if resp.status >= 400:
+                message = data.get("error", {}).get("message", str(data))
+                raise RuntimeError(f"Gemini error {resp.status}: {message}")
+
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError):
+        raise RuntimeError("Gemini returned no usable text")
+    return _ai_extract_json(text)
+
+def _ssh_client():
+    if not AI_SSH_PASSWORD:
+        raise RuntimeError("Missing AI_SSH_PASSWORD")
+    import paramiko
+
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(AI_SSH_HOST, username=AI_SSH_USER, password=AI_SSH_PASSWORD, timeout=15)
+    return ssh
+
+def _sftp_mkdirs(sftp, path: str):
+    parts = [p for p in path.split("/") if p]
+    current = ""
+    if path.startswith("/"):
+        current = "/"
+    for part in parts:
+        current = posixpath.join(current, part)
+        try:
+            sftp.stat(current)
+        except IOError:
+            sftp.mkdir(current)
+
+def _sftp_rm_tree(sftp, path: str):
+    try:
+        entries = sftp.listdir_attr(path)
+    except IOError:
+        return
+    for entry in entries:
+        child = posixpath.join(path, entry.filename)
+        if str(entry.longname).startswith("d"):
+            _sftp_rm_tree(sftp, child)
+        else:
+            sftp.remove(child)
+
+def _ssh_read_files(paths: list[str]) -> dict:
+    ssh = _ssh_client()
+    sftp = ssh.open_sftp()
+    try:
+        result = {}
+        total = 0
+        for raw_path in paths:
+            path = _ai_clean_path(raw_path)
+            remote = _ai_remote_path(path)
+            try:
+                with sftp.open(remote, "rb") as f:
+                    data = f.read(AI_MAX_FILE_CHARS + 1)
+                if len(data) > AI_MAX_FILE_CHARS:
+                    raise RuntimeError(f"`{path}` is too large for AI editing")
+                text = data.decode("utf-8", errors="replace")
+            except FileNotFoundError:
+                text = ""
+            except IOError:
+                text = ""
+            total += len(text)
+            if total > AI_MAX_TOTAL_CHARS:
+                raise RuntimeError("Selected files are too large for one AI edit")
+            result[path] = text
+        return result
+    finally:
+        sftp.close()
+        ssh.close()
+
+def _ssh_apply_ai_edits(edits: list[dict]):
+    ssh = _ssh_client()
+    sftp = ssh.open_sftp()
+    backup_root = posixpath.join(AI_REMOTE_ROOT.rstrip("/"), AI_BACKUP_DIR.strip("/"))
+    try:
+        _sftp_mkdirs(sftp, backup_root)
+        _sftp_rm_tree(sftp, backup_root)
+
+        for edit in edits:
+            path = _ai_clean_path(edit.get("path", ""))
+            content = edit.get("content", "")
+            if not isinstance(content, str):
+                raise RuntimeError(f"`{path}` content must be text")
+
+            remote = _ai_remote_path(path)
+            backup = posixpath.join(backup_root, path)
+            _sftp_mkdirs(sftp, posixpath.dirname(backup))
+            _sftp_mkdirs(sftp, posixpath.dirname(remote))
+
+            try:
+                with sftp.open(remote, "rb") as src:
+                    old_data = src.read()
+                with sftp.open(backup, "wb") as dst:
+                    dst.write(old_data)
+            except IOError:
+                with sftp.open(backup + ".missing", "w") as dst:
+                    dst.write("File did not exist before this AI edit.\n")
+
+            with sftp.open(remote, "w") as dst:
+                dst.write(content)
+    finally:
+        sftp.close()
+        ssh.close()
+
+def _ai_bullets(items, limit=10) -> str:
+    clean = [str(item).strip() for item in (items or []) if str(item).strip()]
+    if not clean:
+        return "- No summary provided"
+    lines = [f"+ {item}" for item in clean[:limit]]
+    if len(clean) > limit:
+        lines.append(f"+ ...and {len(clean) - limit} more")
+    return "\n".join(lines)
+
+async def _ai_plan_files(task: str) -> list[str]:
+    prompt = f"""
+You are planning a safe file edit for the Hellcore server panel.
+Return JSON only with this schema:
+{{"files":["relative/path"],"note":"short note"}}
+
+Rules:
+- Only suggest files that must be read before editing.
+- Paths must be relative paths, not absolute.
+- Prefer paths mentioned by the user.
+- If the task is not a file edit, return {{"files":[],"note":"answer only"}}.
+- Do not invent more than 6 files.
+
+Allowed path prefixes: {", ".join(AI_ALLOWED_PREFIXES)}
+Task: {task}
+"""
+    data = await _gemini_json(prompt)
+    return [_ai_clean_path(path) for path in data.get("files", [])[:6]]
+
+async def _ai_build_edit(task: str, files: dict) -> dict:
+    file_text = []
+    for path, content in files.items():
+        file_text.append(f"--- FILE: {path}\n{content}\n--- END FILE")
+
+    prompt = f"""
+You are editing Hellcore server panel files.
+Return JSON only with this schema:
+{{
+  "answer": "short message if no edits are needed",
+  "summary": ["Added X", "Changed Y"],
+  "edits": [
+    {{"path": "relative/path", "content": "full new file content"}}
+  ]
+}}
+
+Rules:
+- Only edit the provided files.
+- Each edit content must be the full final file content, not a diff.
+- Keep existing formatting and unrelated content.
+- Do not include secrets.
+- If no edit is needed, return edits as [] and put the reply in answer.
+
+Task:
+{task}
+
+Current files:
+{chr(10).join(file_text)}
+"""
+    data = await _gemini_json(prompt)
+    edits = []
+    allowed = set(files.keys())
+    for edit in data.get("edits", []):
+        path = _ai_clean_path(edit.get("path", ""))
+        if path not in allowed:
+            raise RuntimeError(f"AI tried to edit `{path}`, but it was not in the approved read set")
+        content = edit.get("content", "")
+        if not isinstance(content, str):
+            raise RuntimeError(f"AI returned invalid content for `{path}`")
+        edits.append({"path": path, "content": content})
+    return {
+        "answer": str(data.get("answer", "")).strip(),
+        "summary": data.get("summary", []),
+        "edits": edits,
+    }
+
+class AIEditApprovalView(discord.ui.View):
+    def __init__(self, owner_id: int, proposal: dict):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.proposal = proposal
+        self.done = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id and interaction.user.id != AUTHORIZED_ADMIN_ID:
+            await interaction.response.send_message("Only the requester/admin can approve this.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.done:
+            await interaction.response.send_message("This request was already handled.", ephemeral=True)
+            return
+        self.done = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+        try:
+            await asyncio.to_thread(_ssh_apply_ai_edits, self.proposal["edits"])
+            paths = "\n".join(f"- `{edit['path']}`" for edit in self.proposal["edits"])
+            await interaction.followup.send(
+                f"Approved and applied.\n\nBackup refreshed in `{AI_BACKUP_DIR}`.\n\nEdited:\n{paths}",
+                ephemeral=True,
+            )
+        except Exception as e:
+            await interaction.followup.send(f"Apply failed: `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.done:
+            await interaction.response.send_message("This request was already handled.", ephemeral=True)
+            return
+        self.done = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="AI edit cancelled.", embed=None, view=self)
+
 # ── Command ────────────────────────────────────────────────────────────────────
 @bot.tree.command(name="bedwars", description="Look up a player's BedWars stats")
 @app_commands.allowed_contexts(guilds=True, dms=True)
@@ -221,6 +520,66 @@ async def bedwars(interaction: discord.Interaction, username: str, table: bool =
         await interaction.followup.send(f"❌ Image Error\n`{e}`")
 
 # ── System command ─────────────────────────────────────────────────────────────
+@bot.tree.command(name="ai", description="Ask AI to prepare a server panel edit for approval")
+@app_commands.allowed_contexts(guilds=True, dms=True)
+@app_commands.describe(task="Describe what you want changed. Mention file paths when possible.")
+@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.user.id)
+async def ai_command(interaction: discord.Interaction, task: str):
+    if not _ai_is_admin(interaction):
+        await interaction.response.send_message("This command is admin-only.", ephemeral=True)
+        return
+    if len(task) > AI_MAX_PROMPT_CHARS:
+        await interaction.response.send_message(
+            f"Task is too long. Keep it under {AI_MAX_PROMPT_CHARS} characters.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    try:
+        files = await _ai_plan_files(task)
+        if not files:
+            data = await _gemini_json(
+                "Return JSON only as {\"answer\":\"short answer\"}. "
+                f"Answer this Hellcore admin question without editing files:\n{task}"
+            )
+            await interaction.followup.send(data.get("answer", "No answer returned."), ephemeral=True)
+            return
+
+        current_files = await asyncio.to_thread(_ssh_read_files, files)
+        proposal = await _ai_build_edit(task, current_files)
+        edits = proposal["edits"]
+        if not edits:
+            await interaction.followup.send(proposal.get("answer") or "AI did not propose any edits.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="AI wants to edit",
+            color=discord.Color.from_rgb(85, 255, 255),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(
+            name="Files",
+            value="\n".join(f"- `{edit['path']}`" for edit in edits)[:1024],
+            inline=False,
+        )
+        embed.add_field(
+            name="Changes",
+            value=_ai_bullets(proposal.get("summary"))[:1024],
+            inline=False,
+        )
+        embed.add_field(
+            name="Approve?",
+            value="Press Approve to refresh the backup folder, then write these files. Press Cancel to do nothing.",
+            inline=False,
+        )
+        view = AIEditApprovalView(interaction.user.id, proposal)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    except app_commands.CommandOnCooldown:
+        raise
+    except Exception as e:
+        await interaction.followup.send(f"AI failed: `{e}`", ephemeral=True)
+
 @bot.tree.command(name="uses", description="Show bot server resource usage")
 @app_commands.allowed_contexts(guilds=True, dms=True)
 async def uses(interaction: discord.Interaction):
