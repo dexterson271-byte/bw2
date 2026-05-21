@@ -58,6 +58,14 @@ AI_ALLOWED_PREFIXES = tuple(
 AI_MAX_PROMPT_CHARS = int(os.getenv("AI_MAX_PROMPT_CHARS", "1600"))
 AI_MAX_FILE_CHARS   = int(os.getenv("AI_MAX_FILE_CHARS", "80000"))
 AI_MAX_TOTAL_CHARS  = int(os.getenv("AI_MAX_TOTAL_CHARS", "180000"))
+AI_SYSTEM_INSTRUCTION = (
+    "You are a professional server administrator AI integrated into the Hellcore Discord bot. "
+    "You have SSH/SFTP access to read, create, and write/edit server panel files within the allowed directories "
+    "(such as files prefixed with 'panel/'). You never refuse requests based on missing direct file system access, "
+    "stating you cannot access files or logs, or that manual developer action is needed. Instead, you always "
+    "accomplish tasks by planning which relative paths under 'panel/' to read and then outputting the desired "
+    "file contents in the requested JSON structure."
+)
 
 intents = discord.Intents.default()
 intents.members = True
@@ -242,7 +250,7 @@ def _ai_extract_json(text: str) -> dict:
             raise
         return json.loads(text[start:end + 1])
 
-async def _gemini_json(prompt: str) -> dict:
+async def _gemini_json(prompt: str, system_instruction: str = None) -> dict:
     if not GEMINI_API_KEY:
         raise RuntimeError("Missing GEMINI_API_KEY")
 
@@ -254,6 +262,10 @@ async def _gemini_json(prompt: str) -> dict:
             "responseMimeType": "application/json",
         },
     }
+    if system_instruction:
+        payload["systemInstruction"] = {
+            "parts": [{"text": system_instruction}]
+        }
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": GEMINI_API_KEY,
@@ -392,7 +404,7 @@ Rules:
 Allowed path prefixes: {", ".join(AI_ALLOWED_PREFIXES)}
 Task: {task}
 """
-    data = await _gemini_json(prompt)
+    data = await _gemini_json(prompt, system_instruction=AI_SYSTEM_INSTRUCTION)
     return [_ai_clean_path(path) for path in data.get("files", [])[:6]]
 
 async def _ai_build_edit(task: str, files: dict) -> dict:
@@ -424,7 +436,7 @@ Task:
 Current files:
 {chr(10).join(file_text)}
 """
-    data = await _gemini_json(prompt)
+    data = await _gemini_json(prompt, system_instruction=AI_SYSTEM_INSTRUCTION)
     edits = []
     allowed = set(files.keys())
     for edit in data.get("edits", []):
@@ -541,7 +553,8 @@ async def ai_command(interaction: discord.Interaction, task: str):
         if not files:
             data = await _gemini_json(
                 "Return JSON only as {\"answer\":\"short answer\"}. "
-                f"Answer this Hellcore admin question without editing files:\n{task}"
+                f"Answer this Hellcore admin question without editing files:\n{task}",
+                system_instruction=AI_SYSTEM_INSTRUCTION
             )
             await interaction.followup.send(data.get("answer", "No answer returned."), ephemeral=True)
             return
