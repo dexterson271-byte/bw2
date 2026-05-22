@@ -45,16 +45,21 @@ WEBSITE_API_KEY  = os.getenv("WEBSITE_API_KEY", "hellcore_secret_key")
 HC_BOT_SECRET    = os.getenv("HC_BOT_SECRET", "hellcore-secret-123")
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL     = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-AI_PROVIDER      = os.getenv("AI_PROVIDER", "groq").strip().lower()
+AI_PROVIDER      = os.getenv("AI_PROVIDER", "openrouter").strip().lower()
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
+OPENROUTER_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "1200"))
 GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL       = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_MAX_TOKENS  = int(os.getenv("GROQ_MAX_TOKENS", "900"))
 AI_SSH_HOST      = os.getenv("AI_SSH_HOST", "147.93.30.8")
 AI_SSH_USER      = os.getenv("AI_SSH_USER", "root")
 AI_SSH_PASSWORD  = os.getenv("AI_SSH_PASSWORD", "")
 AI_REMOTE_ROOT   = os.getenv("AI_REMOTE_ROOT", "/var/lib/pterodactyl/volumes/22fe458f-52a9-45cf-b21a-4b10990f95a4")
 AI_BACKUP_DIR    = os.getenv("AI_BACKUP_DIR", ".hc_ai_backups/latest")
 AI_LIVE_CONTEXT  = os.getenv("AI_LIVE_CONTEXT", "true").lower() in ("1", "true", "yes", "on")
-AI_LOG_TAIL_BYTES = int(os.getenv("AI_LOG_TAIL_BYTES", "60000"))
+AI_LOG_TAIL_BYTES = int(os.getenv("AI_LOG_TAIL_BYTES", "20000"))
+AI_LOG_CONTEXT_CHARS = int(os.getenv("AI_LOG_CONTEXT_CHARS", "5000"))
 AI_SERVER_PATHS_CONTEXT = os.getenv("AI_SERVER_PATHS_CONTEXT", "").strip()
 AI_ALLOWED_PREFIXES = tuple(
     p.strip().strip("/") + "/"
@@ -302,7 +307,7 @@ async def _groq_json(prompt: str, system_instruction: str = None) -> dict:
         "model": GROQ_MODEL,
         "messages": messages,
         "temperature": 0.2,
-        "max_tokens": 2500,
+        "max_tokens": GROQ_MAX_TOKENS,
         "response_format": {"type": "json_object"},
     }
     headers = {
@@ -310,16 +315,26 @@ async def _groq_json(prompt: str, system_instruction: str = None) -> dict:
         "Content-Type": "application/json",
     }
     async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as resp:
-            data = await resp.json(content_type=None)
-            if resp.status >= 400:
-                message = data.get("error", {}).get("message", str(data))
-                raise RuntimeError(f"Groq error {resp.status}: {message}")
+        for attempt in range(2):
+            async with session.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status == 429 and attempt == 0:
+                    retry_after = resp.headers.get("retry-after")
+                    try:
+                        wait_seconds = min(float(retry_after or 20), 30)
+                    except ValueError:
+                        wait_seconds = 20
+                    await asyncio.sleep(wait_seconds)
+                    continue
+                if resp.status >= 400:
+                    message = data.get("error", {}).get("message", str(data))
+                    raise RuntimeError(f"Groq error {resp.status}: {message}")
+                break
 
     try:
         text = data["choices"][0]["message"]["content"]
@@ -327,11 +342,53 @@ async def _groq_json(prompt: str, system_instruction: str = None) -> dict:
         raise RuntimeError("Groq returned no usable text")
     return _ai_extract_json(text)
 
+async def _openrouter_json(prompt: str, system_instruction: str = None) -> dict:
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("Missing OPENROUTER_API_KEY")
+
+    messages = []
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": messages,
+        "temperature": 0.2,
+        "max_tokens": OPENROUTER_MAX_TOKENS,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://hellcore.net",
+        "X-Title": "Hellcore Bot",
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=75),
+        ) as resp:
+            data = await resp.json(content_type=None)
+            if resp.status >= 400:
+                message = data.get("error", {}).get("message", str(data))
+                raise RuntimeError(f"OpenRouter error {resp.status}: {message}")
+
+    try:
+        text = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise RuntimeError("OpenRouter returned no usable text")
+    return _ai_extract_json(text)
+
 async def _ai_json(prompt: str, system_instruction: str = None) -> dict:
     if AI_PROVIDER == "gemini":
         return await _gemini_json(prompt, system_instruction=system_instruction)
     if AI_PROVIDER == "groq":
         return await _groq_json(prompt, system_instruction=system_instruction)
+    if AI_PROVIDER == "openrouter":
+        return await _openrouter_json(prompt, system_instruction=system_instruction)
     raise RuntimeError(f"Unsupported AI_PROVIDER `{AI_PROVIDER}`")
 
 def _ssh_client():
@@ -434,7 +491,7 @@ def _ssh_collect_live_context(task: str) -> str:
             lines.append("Loaded plugins / plugin jars: unavailable")
 
         if include_logs and latest_log:
-            tail = latest_log[-12000:]
+            tail = latest_log[-AI_LOG_CONTEXT_CHARS:]
             lines.append("Recent logs/latest.log tail:")
             lines.append(tail)
 
