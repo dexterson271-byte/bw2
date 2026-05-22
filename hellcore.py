@@ -45,11 +45,17 @@ WEBSITE_API_KEY  = os.getenv("WEBSITE_API_KEY", "hellcore_secret_key")
 HC_BOT_SECRET    = os.getenv("HC_BOT_SECRET", "hellcore-secret-123")
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL     = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+AI_PROVIDER      = os.getenv("AI_PROVIDER", "groq").strip().lower()
+GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL       = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 AI_SSH_HOST      = os.getenv("AI_SSH_HOST", "147.93.30.8")
 AI_SSH_USER      = os.getenv("AI_SSH_USER", "root")
 AI_SSH_PASSWORD  = os.getenv("AI_SSH_PASSWORD", "")
 AI_REMOTE_ROOT   = os.getenv("AI_REMOTE_ROOT", "/var/lib/pterodactyl/volumes/22fe458f-52a9-45cf-b21a-4b10990f95a4")
 AI_BACKUP_DIR    = os.getenv("AI_BACKUP_DIR", ".hc_ai_backups/latest")
+AI_LIVE_CONTEXT  = os.getenv("AI_LIVE_CONTEXT", "true").lower() in ("1", "true", "yes", "on")
+AI_LOG_TAIL_BYTES = int(os.getenv("AI_LOG_TAIL_BYTES", "60000"))
+AI_SERVER_PATHS_CONTEXT = os.getenv("AI_SERVER_PATHS_CONTEXT", "").strip()
 AI_ALLOWED_PREFIXES = tuple(
     p.strip().strip("/") + "/"
     for p in os.getenv("AI_ALLOWED_PREFIXES", "panel/").split(",")
@@ -60,11 +66,11 @@ AI_MAX_FILE_CHARS   = int(os.getenv("AI_MAX_FILE_CHARS", "80000"))
 AI_MAX_TOTAL_CHARS  = int(os.getenv("AI_MAX_TOTAL_CHARS", "180000"))
 AI_SYSTEM_INSTRUCTION = (
     "You are a professional server administrator AI integrated into the Hellcore Discord bot. "
-    "You have SSH/SFTP access to read, create, and write/edit server panel files within the allowed directories "
-    "(such as files prefixed with 'panel/'). You never refuse requests based on missing direct file system access, "
-    "stating you cannot access files or logs, or that manual developer action is needed. Instead, you always "
-    "accomplish tasks by planning which relative paths under 'panel/' to read and then outputting the desired "
-    "file contents in the requested JSON structure."
+    "You receive live server context when it is relevant, including a server path map, safe snapshots of logs, "
+    "and plugin data. "
+    "For file edits, you have SSH/SFTP access to read, create, and write/edit server panel files within the "
+    "allowed directories (such as files prefixed with 'panel/'). Never claim you cannot access files or logs "
+    "when live context is provided. Use only the provided context and output the requested JSON structure."
 )
 
 intents = discord.Intents.default()
@@ -283,6 +289,51 @@ async def _gemini_json(prompt: str, system_instruction: str = None) -> dict:
         raise RuntimeError("Gemini returned no usable text")
     return _ai_extract_json(text)
 
+async def _groq_json(prompt: str, system_instruction: str = None) -> dict:
+    if not GROQ_API_KEY:
+        raise RuntimeError("Missing GROQ_API_KEY")
+
+    messages = []
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": 0.2,
+        "max_tokens": 2500,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as resp:
+            data = await resp.json(content_type=None)
+            if resp.status >= 400:
+                message = data.get("error", {}).get("message", str(data))
+                raise RuntimeError(f"Groq error {resp.status}: {message}")
+
+    try:
+        text = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise RuntimeError("Groq returned no usable text")
+    return _ai_extract_json(text)
+
+async def _ai_json(prompt: str, system_instruction: str = None) -> dict:
+    if AI_PROVIDER == "gemini":
+        return await _gemini_json(prompt, system_instruction=system_instruction)
+    if AI_PROVIDER == "groq":
+        return await _groq_json(prompt, system_instruction=system_instruction)
+    raise RuntimeError(f"Unsupported AI_PROVIDER `{AI_PROVIDER}`")
+
 def _ssh_client():
     if not AI_SSH_PASSWORD:
         raise RuntimeError("Missing AI_SSH_PASSWORD")
@@ -292,6 +343,105 @@ def _ssh_client():
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(AI_SSH_HOST, username=AI_SSH_USER, password=AI_SSH_PASSWORD, timeout=15)
     return ssh
+
+def _sftp_read_tail(sftp, path: str, max_bytes: int) -> str:
+    with sftp.open(path, "rb") as f:
+        try:
+            size = f.stat().st_size
+            f.seek(max(0, size - max_bytes))
+        except IOError:
+            pass
+        return f.read(max_bytes).decode("utf-8", errors="replace")
+
+def _extract_loaded_plugins(log_text: str) -> list[str]:
+    plugins = []
+    seen = set()
+    patterns = (
+        r"\[([^\]]+)\] Enabling ([A-Za-z0-9_.+\-() ]+)",
+        r"\[([^\]]+)\] ([A-Za-z0-9_.+\-() ]+) (?:enabled|loaded)",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, log_text, re.IGNORECASE):
+            name = match.group(2).strip()
+            low = name.lower()
+            if low and low not in seen and low not in {"plugin", "successfully"}:
+                seen.add(low)
+                plugins.append(name)
+    return plugins
+
+def _ai_server_path_map() -> str:
+    if AI_SERVER_PATHS_CONTEXT:
+        return AI_SERVER_PATHS_CONTEXT
+
+    root = AI_REMOTE_ROOT.rstrip("/")
+    paths = {
+        "server_root": root,
+        "plugins_folder": posixpath.join(root, "plugins"),
+        "latest_log": posixpath.join(root, "logs/latest.log"),
+        "logs_folder": posixpath.join(root, "logs"),
+        "worlds_folder": root,
+        "bedwars_arenas_common": posixpath.join(root, "plugins/BedWars1058"),
+        "rankedbedwars_config": posixpath.join(root, "plugins/rankedbedwars"),
+        "hynick_config": posixpath.join(root, "plugins/HynickPlugin"),
+        "tab_config": posixpath.join(root, "plugins/TAB"),
+        "luckperms_config": posixpath.join(root, "plugins/LuckPerms"),
+        "ai_backup_folder": posixpath.join(root, AI_BACKUP_DIR.strip("/")),
+        "allowed_edit_prefixes": ", ".join(AI_ALLOWED_PREFIXES),
+    }
+    return "\n".join(f"- {name}: {path}" for name, path in paths.items())
+
+def _ssh_collect_live_context(task: str) -> str:
+    if not AI_LIVE_CONTEXT:
+        return ""
+
+    try:
+        ssh = _ssh_client()
+        sftp = ssh.open_sftp()
+    except Exception as e:
+        return f"LIVE SERVER CONTEXT unavailable: {e}"
+
+    try:
+        latest_log = ""
+        log_path = posixpath.join(AI_REMOTE_ROOT.rstrip("/"), "logs/latest.log")
+        try:
+            latest_log = _sftp_read_tail(sftp, log_path, AI_LOG_TAIL_BYTES)
+        except IOError:
+            latest_log = ""
+
+        loaded_plugins = _extract_loaded_plugins(latest_log)
+        if not loaded_plugins:
+            plugins_dir = posixpath.join(AI_REMOTE_ROOT.rstrip("/"), "plugins")
+            try:
+                for item in sftp.listdir_attr(plugins_dir):
+                    name = item.filename
+                    low = name.lower()
+                    if low.endswith(".jar") and not low.endswith(".disabled"):
+                        loaded_plugins.append(name[:-4])
+            except IOError:
+                pass
+
+        task_low = task.lower()
+        include_logs = any(
+            word in task_low
+            for word in ("log", "error", "crash", "rbw", "ranked", "bedwars", "hynick", "plugin", "start")
+        )
+
+        lines = ["LIVE SERVER CONTEXT", "Server path map:", _ai_server_path_map()]
+        if loaded_plugins:
+            lines.append("Loaded plugins / plugin jars:")
+            lines.extend(f"- {name}" for name in loaded_plugins[:80])
+        else:
+            lines.append("Loaded plugins / plugin jars: unavailable")
+
+        if include_logs and latest_log:
+            tail = latest_log[-12000:]
+            lines.append("Recent logs/latest.log tail:")
+            lines.append(tail)
+
+        return "\n".join(lines)
+    finally:
+        sftp.close()
+        ssh.close()
 
 def _sftp_mkdirs(sftp, path: str):
     parts = [p for p in path.split("/") if p]
@@ -389,6 +539,7 @@ def _ai_bullets(items, limit=10) -> str:
     return "\n".join(lines)
 
 async def _ai_plan_files(task: str) -> list[str]:
+    live_context = await asyncio.to_thread(_ssh_collect_live_context, task)
     prompt = f"""
 You are planning a safe file edit for the Hellcore server panel.
 Return JSON only with this schema:
@@ -402,12 +553,16 @@ Rules:
 - Do not invent more than 6 files.
 
 Allowed path prefixes: {", ".join(AI_ALLOWED_PREFIXES)}
+Live context:
+{live_context or "No live context collected."}
+
 Task: {task}
 """
-    data = await _gemini_json(prompt, system_instruction=AI_SYSTEM_INSTRUCTION)
+    data = await _ai_json(prompt, system_instruction=AI_SYSTEM_INSTRUCTION)
     return [_ai_clean_path(path) for path in data.get("files", [])[:6]]
 
 async def _ai_build_edit(task: str, files: dict) -> dict:
+    live_context = await asyncio.to_thread(_ssh_collect_live_context, task)
     file_text = []
     for path, content in files.items():
         file_text.append(f"--- FILE: {path}\n{content}\n--- END FILE")
@@ -433,10 +588,13 @@ Rules:
 Task:
 {task}
 
+Live context:
+{live_context or "No live context collected."}
+
 Current files:
 {chr(10).join(file_text)}
 """
-    data = await _gemini_json(prompt, system_instruction=AI_SYSTEM_INSTRUCTION)
+    data = await _ai_json(prompt, system_instruction=AI_SYSTEM_INSTRUCTION)
     edits = []
     allowed = set(files.keys())
     for edit in data.get("edits", []):
@@ -551,9 +709,12 @@ async def ai_command(interaction: discord.Interaction, task: str):
     try:
         files = await _ai_plan_files(task)
         if not files:
-            data = await _gemini_json(
+            live_context = await asyncio.to_thread(_ssh_collect_live_context, task)
+            data = await _ai_json(
                 "Return JSON only as {\"answer\":\"short answer\"}. "
-                f"Answer this Hellcore admin question without editing files:\n{task}",
+                f"Answer this Hellcore admin question without editing files.\n\n"
+                f"Live context:\n{live_context or 'No live context collected.'}\n\n"
+                f"Task:\n{task}",
                 system_instruction=AI_SYSTEM_INSTRUCTION
             )
             await interaction.followup.send(data.get("answer", "No answer returned."), ephemeral=True)
