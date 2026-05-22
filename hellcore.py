@@ -48,6 +48,14 @@ GEMINI_MODEL     = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 AI_PROVIDER      = os.getenv("AI_PROVIDER", "openrouter").strip().lower()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "z-ai/glm-4.5-air:free")
+OPENROUTER_FALLBACK_MODELS = [
+    model.strip()
+    for model in os.getenv(
+        "OPENROUTER_FALLBACK_MODELS",
+        "qwen/qwen3-coder:free,openai/gpt-oss-20b:free,google/gemma-4-26b-a4b-it:free",
+    ).split(",")
+    if model.strip()
+]
 OPENROUTER_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "1200"))
 GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL       = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
@@ -239,7 +247,7 @@ def _ai_clean_path(path: str) -> str:
     norm = posixpath.normpath(path)
     if norm in ("", ".") or norm.startswith("../") or norm == ".." or "\x00" in norm:
         raise ValueError(f"Unsafe path: {path}")
-    if not any(norm.startswith(prefix) for prefix in AI_ALLOWED_PREFIXES):
+    if "*" not in AI_ALLOWED_PREFIXES and not any(norm.startswith(prefix) for prefix in AI_ALLOWED_PREFIXES):
         allowed = ", ".join(AI_ALLOWED_PREFIXES)
         raise ValueError(f"Path `{norm}` is outside allowed prefixes: {allowed}")
     return norm
@@ -289,6 +297,19 @@ def _ai_response_text(data: dict, provider: str) -> str:
     if reasoning:
         raise RuntimeError(f"{provider} returned reasoning but no answer. Try another model.")
     raise RuntimeError(f"{provider} returned empty content: {str(data)[:500]}")
+
+def _ai_paths_from_task(task: str) -> list[str]:
+    paths = []
+    pattern = r"(?:^|[\s`'\"])((?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_. -]+\.[A-Za-z0-9_.-]+)(?=$|[\s`'\".,;:!?])"
+    for match in re.finditer(pattern, task or ""):
+        raw = match.group(1).strip()
+        try:
+            path = _ai_clean_path(raw)
+        except ValueError:
+            continue
+        if path not in paths:
+            paths.append(path)
+    return paths[:6]
 
 async def _gemini_json(prompt: str, system_instruction: str = None) -> dict:
     if not GEMINI_API_KEY:
@@ -377,33 +398,51 @@ async def _openrouter_json(prompt: str, system_instruction: str = None) -> dict:
         messages.append({"role": "system", "content": system_instruction})
     messages.append({"role": "user", "content": prompt})
 
-    payload = {
-        "model": OPENROUTER_MODEL,
-        "messages": messages,
-        "temperature": 0.2,
-        "max_tokens": OPENROUTER_MAX_TOKENS,
-        "response_format": {"type": "json_object"},
-    }
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://hellcore.net",
         "X-Title": "Hellcore Bot",
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=75),
-        ) as resp:
-            data = await resp.json(content_type=None)
-            if resp.status >= 400:
-                message = data.get("error", {}).get("message", str(data))
-                raise RuntimeError(f"OpenRouter error {resp.status}: {message}")
+    models = []
+    for model in [OPENROUTER_MODEL] + OPENROUTER_FALLBACK_MODELS:
+        if model not in models:
+            models.append(model)
 
-    text = _ai_response_text(data, "OpenRouter")
-    return _ai_extract_json(text)
+    last_error = None
+    async with aiohttp.ClientSession() as session:
+        for model in models:
+            payload = {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.2,
+                "max_tokens": OPENROUTER_MAX_TOKENS,
+                "response_format": {"type": "json_object"},
+                "provider": {
+                    "sort": "throughput",
+                    "allow_fallbacks": True,
+                },
+            }
+            try:
+                async with session.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=75),
+                ) as resp:
+                    data = await resp.json(content_type=None)
+                    if resp.status >= 400:
+                        message = data.get("error", {}).get("message", str(data))
+                        last_error = f"{model}: OpenRouter error {resp.status}: {message}"
+                        continue
+
+                text = _ai_response_text(data, f"OpenRouter {model}")
+                return _ai_extract_json(text)
+            except Exception as e:
+                last_error = f"{model}: {e}"
+                continue
+
+    raise RuntimeError(last_error or "OpenRouter failed with all models")
 
 async def _ai_json(prompt: str, system_instruction: str = None) -> dict:
     if AI_PROVIDER == "gemini":
@@ -619,6 +658,10 @@ def _ai_bullets(items, limit=10) -> str:
     return "\n".join(lines)
 
 async def _ai_plan_files(task: str) -> list[str]:
+    mentioned_paths = _ai_paths_from_task(task)
+    if mentioned_paths:
+        return mentioned_paths
+
     live_context = await asyncio.to_thread(_ssh_collect_live_context, task)
     prompt = f"""
 You are planning a safe file edit for the Hellcore server panel.
@@ -629,6 +672,7 @@ Rules:
 - Only suggest files that must be read before editing.
 - Paths must be relative paths, not absolute.
 - Prefer paths mentioned by the user.
+- If the user mentions a relative file path, include it in files.
 - If the task is not a file edit, return {{"files":[],"note":"answer only"}}.
 - Do not invent more than 6 files.
 
