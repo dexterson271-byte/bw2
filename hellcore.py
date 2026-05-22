@@ -47,7 +47,7 @@ GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL     = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 AI_PROVIDER      = os.getenv("AI_PROVIDER", "openrouter").strip().lower()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "z-ai/glm-4.5-air:free")
 OPENROUTER_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "1200"))
 GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL       = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
@@ -261,6 +261,35 @@ def _ai_extract_json(text: str) -> dict:
             raise
         return json.loads(text[start:end + 1])
 
+def _ai_response_text(data: dict, provider: str) -> str:
+    try:
+        message = data["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError):
+        raise RuntimeError(f"{provider} returned no choices: {str(data)[:500]}")
+
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if text:
+                    parts.append(str(text))
+            elif item:
+                parts.append(str(item))
+        if parts:
+            return "\n".join(parts)
+
+    refusal = message.get("refusal")
+    if refusal:
+        raise RuntimeError(f"{provider} refused: {refusal}")
+    reasoning = message.get("reasoning")
+    if reasoning:
+        raise RuntimeError(f"{provider} returned reasoning but no answer. Try another model.")
+    raise RuntimeError(f"{provider} returned empty content: {str(data)[:500]}")
+
 async def _gemini_json(prompt: str, system_instruction: str = None) -> dict:
     if not GEMINI_API_KEY:
         raise RuntimeError("Missing GEMINI_API_KEY")
@@ -336,10 +365,7 @@ async def _groq_json(prompt: str, system_instruction: str = None) -> dict:
                     raise RuntimeError(f"Groq error {resp.status}: {message}")
                 break
 
-    try:
-        text = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        raise RuntimeError("Groq returned no usable text")
+    text = _ai_response_text(data, "Groq")
     return _ai_extract_json(text)
 
 async def _openrouter_json(prompt: str, system_instruction: str = None) -> dict:
@@ -376,10 +402,7 @@ async def _openrouter_json(prompt: str, system_instruction: str = None) -> dict:
                 message = data.get("error", {}).get("message", str(data))
                 raise RuntimeError(f"OpenRouter error {resp.status}: {message}")
 
-    try:
-        text = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        raise RuntimeError("OpenRouter returned no usable text")
+    text = _ai_response_text(data, "OpenRouter")
     return _ai_extract_json(text)
 
 async def _ai_json(prompt: str, system_instruction: str = None) -> dict:
