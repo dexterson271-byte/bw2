@@ -69,8 +69,14 @@ AI_LIVE_CONTEXT  = os.getenv("AI_LIVE_CONTEXT", "true").lower() in ("1", "true",
 AI_LOG_TAIL_BYTES = int(os.getenv("AI_LOG_TAIL_BYTES", "20000"))
 AI_LOG_CONTEXT_CHARS = int(os.getenv("AI_LOG_CONTEXT_CHARS", "5000"))
 AI_SERVER_PATHS_CONTEXT = os.getenv("AI_SERVER_PATHS_CONTEXT", "").strip()
+def _ai_normalize_allowed_prefix(prefix: str) -> str:
+    prefix = prefix.strip()
+    if prefix in ("*", "*/"):
+        return "*"
+    return prefix.strip("/") + "/"
+
 AI_ALLOWED_PREFIXES = tuple(
-    p.strip().strip("/") + "/"
+    _ai_normalize_allowed_prefix(p)
     for p in os.getenv("AI_ALLOWED_PREFIXES", "panel/").split(",")
     if p.strip()
 )
@@ -81,8 +87,8 @@ AI_SYSTEM_INSTRUCTION = (
     "You are a professional server administrator AI integrated into the Hellcore Discord bot. "
     "You receive live server context when it is relevant, including a server path map, safe snapshots of logs, "
     "and plugin data. "
-    "For file edits, you have SSH/SFTP access to read, create, and write/edit server panel files within the "
-    "allowed directories (such as files prefixed with 'panel/'). Never claim you cannot access files or logs "
+    "For file edits, you have SSH/SFTP access to read, create, and write/edit server files within the "
+    "configured allowed directories. Never claim you cannot access files or logs "
     "when live context is provided. Use only the provided context and output the requested JSON structure."
 )
 
