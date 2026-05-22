@@ -705,7 +705,7 @@ async def ai_command(interaction: discord.Interaction, task: str):
         )
         return
 
-    await interaction.response.defer(thinking=True, ephemeral=True)
+    await interaction.response.defer(thinking=True)
     try:
         files = await _ai_plan_files(task)
         if not files:
@@ -717,14 +717,14 @@ async def ai_command(interaction: discord.Interaction, task: str):
                 f"Task:\n{task}",
                 system_instruction=AI_SYSTEM_INSTRUCTION
             )
-            await interaction.followup.send(data.get("answer", "No answer returned."), ephemeral=True)
+            await interaction.followup.send(data.get("answer", "No answer returned."))
             return
 
         current_files = await asyncio.to_thread(_ssh_read_files, files)
         proposal = await _ai_build_edit(task, current_files)
         edits = proposal["edits"]
         if not edits:
-            await interaction.followup.send(proposal.get("answer") or "AI did not propose any edits.", ephemeral=True)
+            await interaction.followup.send(proposal.get("answer") or "AI did not propose any edits.")
             return
 
         embed = discord.Embed(
@@ -748,11 +748,11 @@ async def ai_command(interaction: discord.Interaction, task: str):
             inline=False,
         )
         view = AIEditApprovalView(interaction.user.id, proposal)
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        await interaction.followup.send(embed=embed, view=view)
     except app_commands.CommandOnCooldown:
         raise
     except Exception as e:
-        await interaction.followup.send(f"AI failed: `{e}`", ephemeral=True)
+        await interaction.followup.send(f"AI failed: `{e}`")
 
 @bot.tree.command(name="uses", description="Show bot server resource usage")
 @app_commands.allowed_contexts(guilds=True, dms=True)
