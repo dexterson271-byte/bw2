@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import discord
+import aiohttp
 from discord import app_commands
 
 
@@ -22,6 +23,11 @@ LOG_CATEGORY_NAME = os.getenv("TICKET_LOG_CATEGORY_NAME", "Ticket Logs")
 LOG_CHANNEL_NAME = os.getenv("TICKET_LOG_CHANNEL_NAME", "ticket-logs")
 TICKET_DATA_FILE = Path(os.getenv("TICKET_DATA_FILE", "ticket_data.json"))
 BANNER_IMAGE_PATH = Path(os.getenv("TICKET_BANNER_PATH", "assets/ticket_banner.png"))
+WEBSITE_API_BASE = os.getenv("WEBSITE_API_BASE", "https://hellcore.net/api").rstrip("/")
+WEBSITE_API_KEY = os.getenv("WEBSITE_API_KEY", "")
+HC_BOT_SECRET = os.getenv("HC_BOT_SECRET", "")
+TICKET_TRANSCRIPT_API_URL = os.getenv("TICKET_TRANSCRIPT_API_URL", f"{WEBSITE_API_BASE}/bot/tickets/transcripts")
+TICKET_TRANSCRIPT_URL_TEMPLATE = os.getenv("TICKET_TRANSCRIPT_URL_TEMPLATE", "https://hellcore.net/tickets/{ticket_id}")
 
 PANEL_COLOR = discord.Color.from_rgb(245, 170, 42)
 TICKET_COLOR = discord.Color.from_rgb(46, 106, 182)
@@ -417,8 +423,19 @@ class TicketControlsView(discord.ui.View):
         if record is None:
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        transcript = await build_transcript(interaction.channel)
-        await interaction.followup.send(file=transcript, ephemeral=True)
+        filename, html_text = await build_transcript_html(interaction.channel)
+        transcript_url = await publish_ticket_transcript(
+            interaction.channel,
+            record,
+            filename,
+            html_text,
+            requested_by=interaction.user,
+            reason="Manual transcript export.",
+        )
+        if transcript_url:
+            await interaction.followup.send(f"Transcript: {transcript_url}", ephemeral=True)
+        else:
+            await interaction.followup.send(file=transcript_file(filename, html_text), ephemeral=True)
 
     @discord.ui.button(label="Lock", style=discord.ButtonStyle.secondary, custom_id="ticket_lock", row=2)
     async def lock(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -731,7 +748,16 @@ async def refresh_ticket_message(channel: discord.TextChannel, record: TicketRec
 async def close_ticket(channel: discord.TextChannel, record: TicketRecord, closed_by: discord.abc.User, reason: str):
     record.status = "Closed"
     STORE.save()
-    transcript = await build_transcript(channel)
+    filename, html_text = await build_transcript_html(channel)
+    transcript_url = await publish_ticket_transcript(
+        channel,
+        record,
+        filename,
+        html_text,
+        requested_by=closed_by,
+        reason=reason,
+    )
+    transcript = transcript_file(filename, html_text)
     log_file = clone_file(transcript)
     dm_file = clone_file(transcript)
     closed_time = utc_now_iso()
@@ -748,13 +774,21 @@ async def close_ticket(channel: discord.TextChannel, record: TicketRecord, close
     embed.add_field(name="Closed time", value=closed_time, inline=False)
     embed.add_field(name="Close reason", value=reason, inline=False)
     embed.add_field(name="Ticket channel name", value=channel.name, inline=False)
+    if transcript_url:
+        embed.add_field(name="Website transcript", value=transcript_url, inline=False)
 
-    await log_channel.send(embed=embed, file=log_file, allowed_mentions=no_everyone_mentions())
+    if transcript_url:
+        await log_channel.send(embed=embed, allowed_mentions=no_everyone_mentions())
+    else:
+        await log_channel.send(embed=embed, file=log_file, allowed_mentions=no_everyone_mentions())
 
     dm_failed = False
     if owner:
         try:
-            await owner.send(embed=embed, file=dm_file, allowed_mentions=no_everyone_mentions())
+            if transcript_url:
+                await owner.send(embed=embed, allowed_mentions=no_everyone_mentions())
+            else:
+                await owner.send(embed=embed, file=dm_file, allowed_mentions=no_everyone_mentions())
         except discord.DiscordException:
             dm_failed = True
 
@@ -766,6 +800,11 @@ async def close_ticket(channel: discord.TextChannel, record: TicketRecord, close
 
 
 async def build_transcript(channel: discord.TextChannel) -> discord.File:
+    filename, html_text = await build_transcript_html(channel)
+    return transcript_file(filename, html_text)
+
+
+async def build_transcript_html(channel: discord.TextChannel) -> tuple[str, str]:
     rows = []
     async for message in channel.history(limit=None, oldest_first=True):
         attachments = ", ".join(a.url for a in message.attachments) or "None"
@@ -787,8 +826,72 @@ async def build_transcript(channel: discord.TextChannel) -> discord.File:
         "</head><body>"
         f"<h1>{html.escape(channel.name)}</h1>{body}</body></html>"
     )
+    return f"{channel.name}-transcript.html", html_text
+
+
+def transcript_file(filename: str, html_text: str) -> discord.File:
     data = io.BytesIO(html_text.encode("utf-8"))
-    return discord.File(data, filename=f"{channel.name}-transcript.html")
+    return discord.File(data, filename=filename)
+
+
+async def publish_ticket_transcript(
+    channel: discord.TextChannel,
+    record: TicketRecord,
+    filename: str,
+    html_text: str,
+    requested_by: discord.abc.User,
+    reason: str,
+) -> str | None:
+    if not TICKET_TRANSCRIPT_API_URL:
+        return None
+
+    ticket_id = str(record.ticket_channel_id)
+    payload = {
+        "ticket_id": ticket_id,
+        "guild_id": str(record.guild_id),
+        "guild_name": channel.guild.name,
+        "channel_id": str(record.ticket_channel_id),
+        "channel_name": channel.name,
+        "owner_id": str(record.user_id),
+        "ticket_type": record.ticket_type,
+        "ticket_type_label": record.ticket_type_label,
+        "claimed_staff_id": str(record.claimed_staff_id) if record.claimed_staff_id else None,
+        "status": record.status,
+        "priority": record.priority,
+        "created_time": record.created_time,
+        "requested_by_id": str(requested_by.id),
+        "requested_by_name": str(requested_by),
+        "reason": reason,
+        "filename": filename,
+        "html": html_text,
+    }
+    headers = {"Content-Type": "application/json"}
+    if WEBSITE_API_KEY:
+        headers["X-API-Key"] = WEBSITE_API_KEY
+    if HC_BOT_SECRET:
+        headers["X-Bot-Secret"] = HC_BOT_SECRET
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(TICKET_TRANSCRIPT_API_URL, json=payload, headers=headers) as response:
+                text = await response.text()
+                if response.status >= 400:
+                    print(f"[tickets] Transcript upload failed: HTTP {response.status} {text[:300]}")
+                    return None
+                try:
+                    data = json.loads(text) if text else {}
+                except json.JSONDecodeError:
+                    data = {}
+    except Exception as exc:
+        print(f"[tickets] Transcript upload failed: {exc}")
+        return None
+
+    url = data.get("url") or data.get("transcript_url") or data.get("public_url")
+    returned_id = str(data.get("ticket_id") or data.get("id") or ticket_id)
+    if not url and TICKET_TRANSCRIPT_URL_TEMPLATE:
+        url = TICKET_TRANSCRIPT_URL_TEMPLATE.format(ticket_id=returned_id)
+    return url
 
 
 def clone_file(file: discord.File) -> discord.File:
