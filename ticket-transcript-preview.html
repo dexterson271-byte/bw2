@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#kq-support - Ticket Transcript</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #313338;
+  --bg-deep: #1e1f22;
+  --panel: #2b2d31;
+  --panel-soft: #383a40;
+  --line: #3f4147;
+  --text: #dbdee1;
+  --muted: #949ba4;
+  --brand: #5865f2;
+  --link: #00a8fc;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "gg sans", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+}
+.app { display: grid; grid-template-columns: 72px minmax(0, 1fr); min-height: 100vh; }
+.rail { background: var(--bg-deep); padding: 12px 0; display: flex; justify-content: center; }
+.server {
+  width: 48px; height: 48px; border-radius: 16px; background: var(--brand);
+  display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 18px;
+}
+.main { min-width: 0; display: flex; flex-direction: column; }
+.topbar {
+  height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 18px;
+  background: var(--bg); border-bottom: 1px solid rgba(0,0,0,.35);
+  box-shadow: 0 1px 0 rgba(0,0,0,.18);
+}
+.hash { color: var(--muted); font-size: 24px; font-weight: 700; }
+.title { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meta { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.intro { padding: 32px 24px 16px; border-bottom: 1px solid var(--line); }
+.intro-icon {
+  width: 68px; height: 68px; border-radius: 50%; background: var(--panel-soft);
+  display: grid; place-items: center; color: var(--muted); font-size: 34px; margin-bottom: 14px;
+}
+.intro h1 { margin: 0 0 8px; font-size: 32px; line-height: 1.1; color: #f2f3f5; }
+.intro p { margin: 0; color: var(--muted); font-size: 14px; }
+.messages { padding: 14px 0 36px; }
+.message { display: grid; grid-template-columns: 56px minmax(0,1fr); padding: 2px 24px 2px 16px; }
+.message:hover { background: rgba(2,3,5,.08); }
+.avatar {
+  width: 40px; height: 40px; border-radius: 50%; margin-top: 4px; background: var(--panel-soft);
+  object-fit: cover;
+}
+.msg-main { min-width: 0; padding: 4px 0 8px; }
+.msg-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.author { color: #f2f3f5; font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+.bot-tag { background: var(--brand); color: #fff; border-radius: 3px; padding: 1px 4px; font-size: 10px; font-weight: 700; }
+.time { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.content { margin-top: 2px; font-size: 15px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.content a, .attachment a { color: var(--link); text-decoration: none; }
+.content a:hover, .attachment a:hover { text-decoration: underline; }
+.attachment {
+  margin-top: 8px; max-width: 520px; border: 1px solid var(--line); background: var(--panel);
+  border-radius: 8px; padding: 10px 12px; color: var(--muted); font-size: 14px;
+}
+.embed {
+  margin-top: 8px; max-width: 520px; border-left: 4px solid var(--brand); background: var(--panel);
+  border-radius: 4px; padding: 10px 12px; color: var(--text);
+}
+.embed-title { font-weight: 700; margin-bottom: 5px; color: #f2f3f5; }
+.embed-desc { color: var(--text); font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.footer { padding: 18px 24px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+@media (max-width: 720px) {
+  .app { grid-template-columns: 0 minmax(0,1fr); }
+  .rail { display: none; }
+  .meta { display: none; }
+  .intro { padding: 24px 16px 14px; }
+  .intro h1 { font-size: 26px; }
+  .message { grid-template-columns: 48px minmax(0,1fr); padding-right: 12px; padding-left: 10px; }
+  .avatar { width: 36px; height: 36px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail"><div class="server">HC</div></aside>
+  <main class="main">
+    <header class="topbar"><span class="hash">#</span><span class="title">kq-support</span><span class="meta">Hellcore RBW - 2026-05-23 23:14 UTC</span></header>
+    <section class="intro">
+      <div class="intro-icon">#</div>
+      <h1>Welcome to #kq-support</h1>
+      <p>This is a read-only ticket transcript from Hellcore RBW. Generated at 2026-05-23 23:14 UTC.</p>
+    </section>
+    <section class="messages">
+      <article class="message">
+        <img class="avatar" src="https://cdn.discordapp.com/embed/avatars/0.png" alt="">
+        <div class="msg-main">
+          <div class="msg-head"><span class="author">KqTF</span><time class="time">05/23/2026 11:05 PM</time></div>
+          <div class="content">hello i need help with my rank
+i bought MVP but it is not showing ingame</div>
+        </div>
+      </article>
+      <article class="message">
+        <img class="avatar" src="https://cdn.discordapp.com/embed/avatars/1.png" alt="">
+        <div class="msg-main">
+          <div class="msg-head"><span class="author">Hellcore Tickets</span><span class="bot-tag">BOT</span><time class="time">05/23/2026 11:05 PM</time></div>
+          <div class="content">Staff will be with you shortly. Please send your username and proof.</div>
+          <div class="embed">
+            <div class="embed-title">Support Ticket</div>
+            <div class="embed-desc">Type: Store Help
+Priority: Normal
+Claimed: None</div>
+          </div>
+        </div>
+      </article>
+      <article class="message">
+        <img class="avatar" src="https://cdn.discordapp.com/embed/avatars/2.png" alt="">
+        <div class="msg-main">
+          <div class="msg-head"><span class="author">ohShiney</span><time class="time">05/23/2026 11:07 PM</time></div>
+          <div class="content">send the payment screenshot here and your Minecraft name</div>
+        </div>
+      </article>
+      <article class="message">
+        <img class="avatar" src="https://cdn.discordapp.com/embed/avatars/3.png" alt="">
+        <div class="msg-main">
+          <div class="msg-head"><span class="author">KqTF</span><time class="time">05/23/2026 11:08 PM</time></div>
+          <div class="content">ign: KqTF</div>
+          <div class="attachment">Attachment: <a href="#" target="_blank" rel="noopener noreferrer">payment-proof.png</a> <span>(842.1 KB)</span></div>
+        </div>
+      </article>
+      <article class="message">
+        <img class="avatar" src="https://cdn.discordapp.com/embed/avatars/4.png" alt="">
+        <div class="msg-main">
+          <div class="msg-head"><span class="author">ohShiney</span><time class="time">05/23/2026 11:10 PM</time></div>
+          <div class="content">fixed, try rejoining now</div>
+        </div>
+      </article>
+    </section>
+    <footer class="footer">Hellcore ticket transcript</footer>
+  </main>
+</div>
+</body>
+</html>

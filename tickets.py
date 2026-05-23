@@ -807,26 +807,173 @@ async def build_transcript(channel: discord.TextChannel) -> discord.File:
 async def build_transcript_html(channel: discord.TextChannel) -> tuple[str, str]:
     rows = []
     async for message in channel.history(limit=None, oldest_first=True):
-        attachments = ", ".join(a.url for a in message.attachments) or "None"
-        content = message.content or ""
-        rows.append(
-            "<article>"
-            f"<h3>{html.escape(str(message.author))} ({message.author.id})</h3>"
-            f"<p><strong>Time:</strong> {message.created_at.isoformat()}</p>"
-            f"<p><strong>Content:</strong> {html.escape(content)}</p>"
-            f"<p><strong>Attachments:</strong> {html.escape(attachments)}</p>"
-            "</article>"
-        )
-    body = "\n".join(rows) or "<p>No messages.</p>"
-    html_text = (
-        "<!doctype html><html><head><meta charset='utf-8'>"
-        "<title>Ticket Transcript</title>"
-        "<style>body{font-family:Arial,sans-serif;background:#111827;color:#e5e7eb}"
-        "article{border-bottom:1px solid #374151;padding:10px}p{margin:4px 0}</style>"
-        "</head><body>"
-        f"<h1>{html.escape(channel.name)}</h1>{body}</body></html>"
-    )
+        rows.append(render_transcript_message(message))
+    body = "\n".join(rows) or "<div class='empty'>No messages in this ticket.</div>"
+    guild_name = html.escape(channel.guild.name)
+    channel_name = html.escape(channel.name)
+    generated_at = discord.utils.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    html_text = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#{channel_name} - Ticket Transcript</title>
+<style>
+:root {{
+  color-scheme: dark;
+  --bg: #313338;
+  --bg-deep: #1e1f22;
+  --panel: #2b2d31;
+  --panel-soft: #383a40;
+  --line: #3f4147;
+  --text: #dbdee1;
+  --muted: #949ba4;
+  --brand: #5865f2;
+  --link: #00a8fc;
+  --green: #23a559;
+}}
+* {{ box-sizing: border-box; }}
+body {{
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "gg sans", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+}}
+.app {{ display: grid; grid-template-columns: 72px minmax(0, 1fr); min-height: 100vh; }}
+.rail {{ background: var(--bg-deep); padding: 12px 0; display: flex; justify-content: center; }}
+.server {{
+  width: 48px; height: 48px; border-radius: 16px; background: var(--brand);
+  display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 18px;
+}}
+.main {{ min-width: 0; display: flex; flex-direction: column; }}
+.topbar {{
+  height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 18px;
+  background: var(--bg); border-bottom: 1px solid rgba(0,0,0,.35);
+  box-shadow: 0 1px 0 rgba(0,0,0,.18);
+}}
+.hash {{ color: var(--muted); font-size: 24px; font-weight: 700; }}
+.title {{ font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+.meta {{ margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }}
+.intro {{ padding: 32px 24px 16px; border-bottom: 1px solid var(--line); }}
+.intro-icon {{
+  width: 68px; height: 68px; border-radius: 50%; background: var(--panel-soft);
+  display: grid; place-items: center; color: var(--muted); font-size: 34px; margin-bottom: 14px;
+}}
+.intro h1 {{ margin: 0 0 8px; font-size: 32px; line-height: 1.1; color: #f2f3f5; }}
+.intro p {{ margin: 0; color: var(--muted); font-size: 14px; }}
+.messages {{ padding: 14px 0 36px; }}
+.message {{ display: grid; grid-template-columns: 56px minmax(0,1fr); padding: 2px 24px 2px 16px; }}
+.message:hover {{ background: rgba(2,3,5,.08); }}
+.avatar {{
+  width: 40px; height: 40px; border-radius: 50%; margin-top: 4px; background: var(--panel-soft);
+  object-fit: cover;
+}}
+.msg-main {{ min-width: 0; padding: 4px 0 8px; }}
+.msg-head {{ display: flex; align-items: baseline; gap: 8px; min-width: 0; }}
+.author {{ color: #f2f3f5; font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }}
+.bot-tag {{ background: var(--brand); color: #fff; border-radius: 3px; padding: 1px 4px; font-size: 10px; font-weight: 700; }}
+.time {{ color: var(--muted); font-size: 12px; white-space: nowrap; }}
+.content {{ margin-top: 2px; font-size: 15px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }}
+.content a, .attachment a {{ color: var(--link); text-decoration: none; }}
+.content a:hover, .attachment a:hover {{ text-decoration: underline; }}
+.attachment {{
+  margin-top: 8px; max-width: 520px; border: 1px solid var(--line); background: var(--panel);
+  border-radius: 8px; padding: 10px 12px; color: var(--muted); font-size: 14px;
+}}
+.embed {{
+  margin-top: 8px; max-width: 520px; border-left: 4px solid var(--brand); background: var(--panel);
+  border-radius: 4px; padding: 10px 12px; color: var(--text);
+}}
+.embed-title {{ font-weight: 700; margin-bottom: 5px; color: #f2f3f5; }}
+.embed-desc {{ color: var(--text); font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }}
+.empty {{ padding: 30px 24px; color: var(--muted); }}
+.footer {{ padding: 18px 24px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }}
+@media (max-width: 720px) {{
+  .app {{ grid-template-columns: 0 minmax(0,1fr); }}
+  .rail {{ display: none; }}
+  .meta {{ display: none; }}
+  .intro {{ padding: 24px 16px 14px; }}
+  .intro h1 {{ font-size: 26px; }}
+  .message {{ grid-template-columns: 48px minmax(0,1fr); padding-right: 12px; padding-left: 10px; }}
+  .avatar {{ width: 36px; height: 36px; }}
+}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail"><div class="server">{html.escape(channel.guild.name[:2].upper())}</div></aside>
+  <main class="main">
+    <header class="topbar"><span class="hash">#</span><span class="title">{channel_name}</span><span class="meta">{guild_name} - {generated_at}</span></header>
+    <section class="intro">
+      <div class="intro-icon">#</div>
+      <h1>Welcome to #{channel_name}</h1>
+      <p>This is a read-only ticket transcript from {guild_name}. Generated at {generated_at}.</p>
+    </section>
+    <section class="messages">{body}</section>
+    <footer class="footer">Hellcore ticket transcript</footer>
+  </main>
+</div>
+</body>
+</html>"""
     return f"{channel.name}-transcript.html", html_text
+
+
+def render_transcript_message(message: discord.Message) -> str:
+    author = html.escape(message.author.display_name or str(message.author))
+    author_full = html.escape(str(message.author))
+    avatar = html.escape(message.author.display_avatar.url)
+    timestamp = message.created_at.strftime("%m/%d/%Y %I:%M %p")
+    bot_tag = "<span class='bot-tag'>BOT</span>" if message.author.bot else ""
+    content = linkify_transcript_text(message.content or "")
+    attachments = "".join(render_transcript_attachment(attachment) for attachment in message.attachments)
+    embeds = "".join(render_transcript_embed(embed) for embed in message.embeds)
+    if not content and not attachments and not embeds:
+        content = "<span style='color:var(--muted)'>(no text content)</span>"
+    return (
+        "<article class='message'>"
+        f"<img class='avatar' src='{avatar}' alt=''>"
+        "<div class='msg-main'>"
+        "<div class='msg-head'>"
+        f"<span class='author' title='{author_full}'>{author}</span>{bot_tag}"
+        f"<time class='time'>{timestamp}</time>"
+        "</div>"
+        f"<div class='content'>{content}</div>"
+        f"{attachments}{embeds}"
+        "</div>"
+        "</article>"
+    )
+
+
+def linkify_transcript_text(text: str) -> str:
+    escaped = html.escape(text)
+    pattern = re.compile(r"(https?://[^\s<]+)")
+    return pattern.sub(lambda match: f"<a href='{html.escape(match.group(1), quote=True)}' target='_blank' rel='noopener noreferrer'>{match.group(1)}</a>", escaped)
+
+
+def render_transcript_attachment(attachment: discord.Attachment) -> str:
+    name = html.escape(attachment.filename)
+    url = html.escape(attachment.url, quote=True)
+    size = f"{attachment.size / 1024:.1f} KB" if attachment.size < 1024 * 1024 else f"{attachment.size / (1024 * 1024):.1f} MB"
+    return (
+        "<div class='attachment'>"
+        f"Attachment: <a href='{url}' target='_blank' rel='noopener noreferrer'>{name}</a>"
+        f" <span>({size})</span>"
+        "</div>"
+    )
+
+
+def render_transcript_embed(embed: discord.Embed) -> str:
+    title = html.escape(embed.title or "Embed")
+    description = linkify_transcript_text(embed.description or "")
+    if not title and not description:
+        return ""
+    return (
+        "<div class='embed'>"
+        f"<div class='embed-title'>{title}</div>"
+        f"<div class='embed-desc'>{description}</div>"
+        "</div>"
+    )
 
 
 def transcript_file(filename: str, html_text: str) -> discord.File:
