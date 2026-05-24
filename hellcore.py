@@ -8,7 +8,7 @@ from datetime import datetime
 from discord.ext import tasks
 
 from card import build_card
-from tickets import post_all_ticket_panels, register_persistent_ticket_views, setup_ticket_system
+from tickets import post_all_ticket_panels, refresh_open_ticket_controls, register_persistent_ticket_views, setup_ticket_system
 
 def _load_local_env(path: str = ".env"):
     if not os.path.exists(path):
@@ -944,7 +944,8 @@ async def help_command(interaction: discord.Interaction):
         name="🎮 BedWars Stats",
         value=(
             "`/bedwars <username> [table]` - Look up a player's stats.\n"
-            "`/verify <code>` - Link your Minecraft account."
+            "`/verify <code>` - Link your Minecraft account.\n"
+            "`/commands` - Show commands your account can use."
         ),
         inline=False
     )
@@ -974,6 +975,72 @@ async def help_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+ADMIN_ONLY_COMMANDS = {
+    "audit",
+    "force_sync",
+    "unlink",
+    "userinfo",
+    "post_game_rules",
+    "post_server_rules",
+    "ticket-setup",
+    "post_ticket_panels",
+}
+
+
+async def _fetch_linked_user(discord_id: int) -> dict | None:
+    headers = {"X-Bot-Secret": HC_BOT_SECRET}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{WEBSITE_API_BASE}/bot/ranks", headers=headers, timeout=10) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"Website API returned {resp.status}")
+            users_data = await resp.json()
+    return next((u for u in users_data if str(u.get("discord_id")) == str(discord_id)), None)
+
+
+def _user_can_use_command(command_name: str, interaction: discord.Interaction) -> bool:
+    if command_name in ADMIN_ONLY_COMMANDS:
+        return interaction.user.id == AUTHORIZED_ADMIN_ID
+    return True
+
+
+@bot.tree.command(name="commands", description="Show the commands you are allowed to use")
+@app_commands.allowed_contexts(guilds=True, dms=True)
+async def commands_command(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        linked_user = await _fetch_linked_user(interaction.user.id)
+    except Exception as exc:
+        await interaction.followup.send(f"Could not check your registration: `{exc}`", ephemeral=True)
+        return
+
+    if not linked_user:
+        await interaction.followup.send(
+            "You are not registered yet. Use `/verify` with the code from the website first, then run `/commands` again.",
+            ephemeral=True,
+        )
+        return
+
+    allowed = []
+    for command in bot.tree.walk_commands():
+        if isinstance(command, app_commands.Command) and _user_can_use_command(command.name, interaction):
+            allowed.append(command)
+    allowed.sort(key=lambda command: command.name)
+
+    lines = [f"`/{command.name}` - {command.description or 'No description'}" for command in allowed]
+    embed = discord.Embed(
+        title=f"Commands for {interaction.user.display_name}",
+        description="\n".join(lines[:45]) or "No commands available.",
+        color=discord.Color.from_rgb(85, 255, 255),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="Registered username", value=str(linked_user.get("username") or linked_user.get("ign") or "Unknown"), inline=True)
+    embed.add_field(name="Allowed commands", value=str(len(allowed)), inline=True)
+    embed.set_footer(
+        text=f"Showing first 45 of {len(lines)} commands." if len(lines) > 45 else "Based on your registration and Discord permissions."
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 # ── Startup ────────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
@@ -984,6 +1051,8 @@ async def on_ready():
     print("✅ Commands synced")
     posted_panels = await post_all_ticket_panels(bot)
     print(f"Ticket panels refreshed: {posted_panels}")
+    refreshed_tickets = await refresh_open_ticket_controls(bot)
+    print(f"Ticket controls refreshed: {refreshed_tickets}")
     if not update_status_embed.is_running():
         update_status_embed.start()
     if not sync_ranks_task.is_running():

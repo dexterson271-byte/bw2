@@ -23,6 +23,14 @@ LOG_CATEGORY_NAME = os.getenv("TICKET_LOG_CATEGORY_NAME", "Ticket Logs")
 LOG_CHANNEL_NAME = os.getenv("TICKET_LOG_CHANNEL_NAME", "ticket-logs")
 TICKET_DATA_FILE = Path(os.getenv("TICKET_DATA_FILE", "ticket_data.json"))
 BANNER_IMAGE_PATH = Path(os.getenv("TICKET_BANNER_PATH", "assets/ticket_banner.png"))
+TICKET_BANNER_URL = os.getenv(
+    "TICKET_BANNER_URL",
+    "https://media.discordapp.net/attachments/1503736831043174411/1507926034581033152/rbw.gif?ex=6a13ad0e&is=6a125b8e&hm=4b775a0cfe0ca54d9145bf6a3301841656f49908630c9abc2840fec641863080&=&width=748&height=264",
+)
+TICKET_ICON_URL = os.getenv(
+    "TICKET_ICON_URL",
+    "https://cdn.discordapp.com/icons/1503724604617785436/e586b5d8da28d6de396cfca7df35586b.png?size=1024",
+)
 WEBSITE_API_BASE = os.getenv("WEBSITE_API_BASE", "https://hellcore.net/api").rstrip("/")
 WEBSITE_API_KEY = os.getenv("WEBSITE_API_KEY", "")
 HC_BOT_SECRET = os.getenv("HC_BOT_SECRET", "")
@@ -223,6 +231,19 @@ async def cleanup_deleted_ticket(channel: discord.abc.GuildChannel):
     STORE.remove(channel.id)
 
 
+async def refresh_open_ticket_controls(bot) -> int:
+    refreshed = 0
+    for record in list(STORE.records.values()):
+        if record.status != "Open":
+            continue
+        guild = bot.get_guild(record.guild_id)
+        channel = guild.get_channel(record.ticket_channel_id) if guild else None
+        if isinstance(channel, discord.TextChannel):
+            await refresh_ticket_message(channel, record)
+            refreshed += 1
+    return refreshed
+
+
 async def post_all_ticket_panels(bot) -> int:
     count = 0
     for config in PANEL_CONFIGS.values():
@@ -239,9 +260,9 @@ async def post_all_ticket_panels(bot) -> int:
 
 
 async def post_ticket_panel(channel: discord.TextChannel, config: TicketPanelConfig) -> bool:
-    banner = load_banner_file()
+    banner = None if TICKET_BANNER_URL else load_banner_file()
     file = discord.File(banner, filename=f"{config.key}_ticket_panel.png") if banner else None
-    embed = build_panel_embed(config, has_banner=file is not None)
+    embed = build_panel_embed(config, has_banner=TICKET_BANNER_URL or file is not None)
     view = TicketPanelView(config)
     existing = await find_existing_panel_message(channel, config)
 
@@ -252,7 +273,7 @@ async def post_ticket_panel(channel: discord.TextChannel, config: TicketPanelCon
             await channel.send(embed=embed, file=file, view=view, allowed_mentions=no_everyone_mentions())
         else:
             await channel.send(embed=embed, view=view, allowed_mentions=no_everyone_mentions())
-    return file is not None
+    return bool(TICKET_BANNER_URL or file is not None)
 
 
 async def find_existing_panel_message(channel: discord.TextChannel, config: TicketPanelConfig):
@@ -271,7 +292,11 @@ def build_panel_embed(config: TicketPanelConfig, has_banner: bool) -> discord.Em
         description=PANEL_RULES,
         color=PANEL_COLOR,
     )
-    if has_banner:
+    if TICKET_ICON_URL:
+        embed.set_thumbnail(url=TICKET_ICON_URL)
+    if TICKET_BANNER_URL:
+        embed.set_image(url=TICKET_BANNER_URL)
+    elif has_banner:
         embed.set_image(url=f"attachment://{config.key}_ticket_panel.png")
     for ticket_type in config.ticket_types:
         embed.add_field(name=ticket_type.label, value=ticket_type.description, inline=True)
@@ -352,34 +377,23 @@ class TicketControlsView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary, custom_id="ticket_claim", row=0)
-    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Claim / Unclaim", style=discord.ButtonStyle.primary, custom_id="ticket_claim_toggle", row=0)
+    async def claim_toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
         record = await require_staff_ticket(interaction)
         if record is None:
             return
-        if record.claimed_staff_id:
-            await interaction.response.send_message("This ticket is already claimed.", ephemeral=True)
-            return
-        record.claimed_staff_id = interaction.user.id
-        STORE.save()
-        await refresh_ticket_message(interaction.channel, record)
-        await interaction.response.send_message("Ticket claimed.", ephemeral=True)
-
-    @discord.ui.button(label="Unclaim", style=discord.ButtonStyle.secondary, custom_id="ticket_unclaim", row=0)
-    async def unclaim(self, interaction: discord.Interaction, button: discord.ui.Button):
-        record = await require_staff_ticket(interaction)
-        if record is None:
-            return
-        if not record.claimed_staff_id:
-            await interaction.response.send_message("This ticket is not claimed.", ephemeral=True)
-            return
-        if record.claimed_staff_id != interaction.user.id and not interaction.user.guild_permissions.administrator:
+        if record.claimed_staff_id and record.claimed_staff_id != interaction.user.id and not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("Only the claimed staff member or an admin can unclaim.", ephemeral=True)
             return
-        record.claimed_staff_id = None
+        if record.claimed_staff_id:
+            record.claimed_staff_id = None
+            response = "Ticket unclaimed."
+        else:
+            record.claimed_staff_id = interaction.user.id
+            response = "Ticket claimed."
         STORE.save()
         await refresh_ticket_message(interaction.channel, record)
-        await interaction.response.send_message("Ticket unclaimed.", ephemeral=True)
+        await interaction.response.send_message(response, ephemeral=True)
 
     @discord.ui.button(label="Close Request", style=discord.ButtonStyle.secondary, custom_id="ticket_close_request", row=0)
     async def close_request(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -399,17 +413,11 @@ class TicketControlsView(discord.ui.View):
         if record is not None:
             await interaction.response.send_modal(CloseReasonModal(record.ticket_channel_id))
 
-    @discord.ui.button(label="Add User", style=discord.ButtonStyle.secondary, custom_id="ticket_add_user", row=1)
-    async def add_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="User Access", style=discord.ButtonStyle.secondary, custom_id="ticket_user_access", row=1)
+    async def user_access(self, interaction: discord.Interaction, button: discord.ui.Button):
         record = await require_staff_ticket(interaction)
         if record is not None:
-            await interaction.response.send_modal(UserPermissionModal("add", record.ticket_channel_id))
-
-    @discord.ui.button(label="Remove User", style=discord.ButtonStyle.secondary, custom_id="ticket_remove_user", row=1)
-    async def remove_user(self, interaction: discord.Interaction, button: discord.ui.Button):
-        record = await require_staff_ticket(interaction)
-        if record is not None:
-            await interaction.response.send_modal(UserPermissionModal("remove", record.ticket_channel_id))
+            await interaction.response.send_modal(UserPermissionModal(record.ticket_channel_id))
 
     @discord.ui.button(label="Rename", style=discord.ButtonStyle.secondary, custom_id="ticket_rename", row=1)
     async def rename(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -437,38 +445,30 @@ class TicketControlsView(discord.ui.View):
         else:
             await interaction.followup.send(file=transcript_file(filename, html_text), ephemeral=True)
 
-    @discord.ui.button(label="Lock", style=discord.ButtonStyle.secondary, custom_id="ticket_lock", row=2)
-    async def lock(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Lock / Unlock", style=discord.ButtonStyle.secondary, custom_id="ticket_lock_toggle", row=2)
+    async def lock_toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
         record = await require_staff_ticket(interaction)
         if record is None:
             return
         member = interaction.guild.get_member(record.user_id)
         if member:
-            await interaction.channel.set_permissions(member, send_messages=False, view_channel=True, read_message_history=True)
-        await interaction.response.send_message("Ticket locked.", ephemeral=True)
-
-    @discord.ui.button(label="Unlock", style=discord.ButtonStyle.secondary, custom_id="ticket_unlock", row=2)
-    async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button):
-        record = await require_staff_ticket(interaction)
-        if record is None:
+            overwrite = interaction.channel.overwrites_for(member)
+            locked = overwrite.send_messages is False
+            await interaction.channel.set_permissions(
+                member,
+                send_messages=True if locked else False,
+                view_channel=True,
+                read_message_history=True,
+            )
+            await interaction.response.send_message("Ticket unlocked." if locked else "Ticket locked.", ephemeral=True)
             return
-        member = interaction.guild.get_member(record.user_id)
-        if member:
-            await interaction.channel.set_permissions(member, send_messages=True, view_channel=True, read_message_history=True)
-        await interaction.response.send_message("Ticket unlocked.", ephemeral=True)
+        await interaction.response.send_message("Ticket owner is not in this server.", ephemeral=True)
 
     @discord.ui.button(label="Priority", style=discord.ButtonStyle.secondary, custom_id="ticket_priority", row=2)
     async def priority(self, interaction: discord.Interaction, button: discord.ui.Button):
         record = await require_staff_ticket(interaction)
         if record is not None:
             await interaction.response.send_message("Select a priority.", view=PriorityView(record.ticket_channel_id), ephemeral=True)
-
-    @discord.ui.button(label="Transfer", style=discord.ButtonStyle.secondary, custom_id="ticket_transfer", row=2)
-    async def transfer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        record = await require_staff_ticket(interaction)
-        if record is not None:
-            await interaction.response.send_modal(TransferClaimModal(record.ticket_channel_id))
-
 
 class PriorityView(discord.ui.View):
     def __init__(self, channel_id: int):
@@ -535,12 +535,12 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
         await close_ticket(interaction.channel, record, interaction.user, str(self.reason.value).strip() or DEFAULT_REASON)
 
 
-class UserPermissionModal(discord.ui.Modal):
+class UserPermissionModal(discord.ui.Modal, title="User Access"):
+    action = discord.ui.TextInput(label="Action", placeholder="add or remove", required=True, max_length=10)
     user_id = discord.ui.TextInput(label="User ID", required=True, max_length=24)
 
-    def __init__(self, mode: str, channel_id: int):
-        super().__init__(title="Add User" if mode == "add" else "Remove User")
-        self.mode = mode
+    def __init__(self, channel_id: int):
+        super().__init__()
         self.channel_id = channel_id
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -549,12 +549,15 @@ class UserPermissionModal(discord.ui.Modal):
         if record is None or member is None:
             await interaction.response.send_message("User or ticket was not found.", ephemeral=True)
             return
-        if self.mode == "add":
+        action = str(self.action.value).strip().lower()
+        if action in ("add", "+"):
             await interaction.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
             await interaction.response.send_message(f"Added {member.mention}.", ephemeral=True, allowed_mentions=no_everyone_mentions())
-        else:
+        elif action in ("remove", "rem", "delete", "-"):
             await interaction.channel.set_permissions(member, overwrite=None)
             await interaction.response.send_message(f"Removed {member.mention}.", ephemeral=True, allowed_mentions=no_everyone_mentions())
+        else:
+            await interaction.response.send_message("Action must be `add` or `remove`.", ephemeral=True)
 
 
 class RenameTicketModal(discord.ui.Modal, title="Rename Ticket"):
@@ -572,25 +575,6 @@ class RenameTicketModal(discord.ui.Modal, title="Rename Ticket"):
         new_name = sanitize_channel_name(str(self.channel_name.value))
         await interaction.channel.edit(name=new_name, reason=f"Ticket renamed by {interaction.user}")
         await interaction.response.send_message("Ticket renamed.", ephemeral=True)
-
-
-class TransferClaimModal(discord.ui.Modal, title="Transfer Claim"):
-    staff_user_id = discord.ui.TextInput(label="Staff user ID", required=True, max_length=24)
-
-    def __init__(self, channel_id: int):
-        super().__init__()
-        self.channel_id = channel_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        record = STORE.get(self.channel_id)
-        member = await resolve_member(interaction.guild, str(self.staff_user_id.value))
-        if record is None or member is None or not is_ticket_staff(member):
-            await interaction.response.send_message("Staff member or ticket was not found.", ephemeral=True)
-            return
-        record.claimed_staff_id = member.id
-        STORE.save()
-        await refresh_ticket_message(interaction.channel, record)
-        await interaction.response.send_message(f"Claim transferred to {member.mention}.", ephemeral=True, allowed_mentions=no_everyone_mentions())
 
 
 async def create_ticket_channel(
@@ -731,6 +715,10 @@ def build_ticket_embed(record: TicketRecord, guild: discord.Guild) -> discord.Em
         color=TICKET_COLOR,
         timestamp=parse_iso(record.created_time),
     )
+    if TICKET_ICON_URL:
+        embed.set_thumbnail(url=TICKET_ICON_URL)
+    if TICKET_BANNER_URL:
+        embed.set_image(url=TICKET_BANNER_URL)
     embed.set_footer(text=f"{guild.name} ticket")
     return embed
 
@@ -765,6 +753,8 @@ async def close_ticket(channel: discord.TextChannel, record: TicketRecord, close
     owner = channel.guild.get_member(record.user_id) or await fetch_user(channel.guild, record.user_id)
 
     embed = discord.Embed(title="Ticket Closed", color=discord.Color.dark_gold(), timestamp=parse_iso(closed_time))
+    if TICKET_ICON_URL:
+        embed.set_thumbnail(url=TICKET_ICON_URL)
     embed.add_field(name="Ticket owner", value=f"{owner} ({record.user_id})", inline=False)
     embed.add_field(name="Ticket type", value=record.ticket_type_label, inline=True)
     embed.add_field(name="Server name", value=channel.guild.name, inline=True)
