@@ -6,6 +6,7 @@ import psutil
 import matplotlib.pyplot as plt
 from datetime import datetime
 from discord.ext import tasks
+from pymongo import MongoClient
 
 from card import build_card
 from tickets import post_all_ticket_panels, refresh_open_ticket_controls, register_persistent_ticket_views, setup_ticket_system
@@ -43,6 +44,8 @@ AUTHORIZED_ADMIN_ID = int(os.getenv("AUTHORIZED_ADMIN_ID", 1152817463189327902))
 WEBSITE_API_BASE = os.getenv("WEBSITE_API_BASE", "https://hellcore.net/api")
 WEBSITE_API_KEY  = os.getenv("WEBSITE_API_KEY", "hellcore_secret_key")
 HC_BOT_SECRET    = os.getenv("HC_BOT_SECRET", "hellcore-secret-123")
+RBW_MONGO_URI    = os.getenv("RBW_MONGO_URI") or os.getenv("MONGO_URI") or os.getenv("MONGO_PUBLIC_URL") or os.getenv("MONGO_URL", "")
+RBW_MONGO_DB     = os.getenv("RBW_MONGO_DB") or os.getenv("DBNAME", "deyorbw")
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL     = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 AI_PROVIDER      = os.getenv("AI_PROVIDER", "openrouter").strip().lower()
@@ -944,7 +947,6 @@ async def help_command(interaction: discord.Interaction):
         name="🎮 BedWars Stats",
         value=(
             "`/bedwars <username> [table]` - Look up a player's stats.\n"
-            "`/verify <code>` - Link your Minecraft account.\n"
             "`/commands` - Show commands your account can use."
         ),
         inline=False
@@ -988,13 +990,18 @@ ADMIN_ONLY_COMMANDS = {
 
 
 async def _fetch_linked_user(discord_id: int) -> dict | None:
-    headers = {"X-Bot-Secret": HC_BOT_SECRET}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{WEBSITE_API_BASE}/bot/ranks", headers=headers, timeout=10) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"Website API returned {resp.status}")
-            users_data = await resp.json()
-    return next((u for u in users_data if str(u.get("discord_id")) == str(discord_id)), None)
+    if not RBW_MONGO_URI:
+        raise RuntimeError("Missing RBW_MONGO_URI, MONGO_URI, MONGO_PUBLIC_URL, or MONGO_URL")
+
+    def query_user():
+        client = MongoClient(RBW_MONGO_URI, serverSelectionTimeoutMS=8000)
+        try:
+            db = client[RBW_MONGO_DB]
+            return db.users.find_one({"discordId": str(discord_id)}, {"discordId": 1, "ign": 1})
+        finally:
+            client.close()
+
+    return await asyncio.to_thread(query_user)
 
 
 def _user_can_use_command(command_name: str, interaction: discord.Interaction) -> bool:
@@ -1015,7 +1022,7 @@ async def commands_command(interaction: discord.Interaction):
 
     if not linked_user:
         await interaction.followup.send(
-            "You are not registered yet. Use `/verify` with the code from the website first, then run `/commands` again.",
+            "You are not registered yet. Use `/register` in the RBW bot first, then run `/commands` again.",
             ephemeral=True,
         )
         return
@@ -1033,7 +1040,7 @@ async def commands_command(interaction: discord.Interaction):
         color=discord.Color.from_rgb(85, 255, 255),
         timestamp=discord.utils.utcnow(),
     )
-    embed.add_field(name="Registered username", value=str(linked_user.get("username") or linked_user.get("ign") or "Unknown"), inline=True)
+    embed.add_field(name="Registered IGN", value=str(linked_user.get("ign") or "Unknown"), inline=True)
     embed.add_field(name="Allowed commands", value=str(len(allowed)), inline=True)
     embed.set_footer(
         text=f"Showing first 45 of {len(lines)} commands." if len(lines) > 45 else "Based on your registration and Discord permissions."
@@ -1488,26 +1495,6 @@ async def post_server_rules(interaction: discord.Interaction):
     
     await interaction.followup.send("✅ Server rules embed posted!", ephemeral=True)
     await interaction.channel.send(embed=embed)
-
-# ── Verify Command ─────────────────────────────────────────────────────────────
-@bot.tree.command(name="verify", description="Link your account to the website")
-@app_commands.describe(code="6-digit code from /verify on the website")
-async def verify(interaction: discord.Interaction, code: str):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        headers = {"X-Bot-Secret": HC_BOT_SECRET}
-        payload = {"code": code, "discord_id": str(interaction.user.id)}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{WEBSITE_API_BASE}/bot/verify", json=payload, headers=headers) as resp:
-                data = await resp.json()
-                if resp.status == 200:
-                    await interaction.followup.send(f"✅ Linked to **{data['username']}**!", ephemeral=True)
-                    sync_ranks_task.restart()
-                else:
-                    await interaction.followup.send(f"❌ Error: {data.get('error', 'Unknown')}", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Verification error: {e}", ephemeral=True)
-
 
 if not BOT_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN environment variable")
