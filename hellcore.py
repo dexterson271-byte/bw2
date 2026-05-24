@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from discord.ext import tasks
 from pymongo import MongoClient
+import pymysql
 
 from card import build_card
 from tickets import post_all_ticket_panels, refresh_open_ticket_controls, register_persistent_ticket_views, setup_ticket_system
@@ -46,6 +47,12 @@ WEBSITE_API_KEY  = os.getenv("WEBSITE_API_KEY", "hellcore_secret_key")
 HC_BOT_SECRET    = os.getenv("HC_BOT_SECRET", "hellcore-secret-123")
 RBW_MONGO_URI    = os.getenv("RBW_MONGO_URI") or os.getenv("MONGO_URI") or os.getenv("MONGO_PUBLIC_URL") or os.getenv("MONGO_URL", "")
 RBW_MONGO_DB     = os.getenv("RBW_MONGO_DB") or os.getenv("DBNAME", "deyorbw")
+LUCKPERMS_MYSQL_HOST = os.getenv("LUCKPERMS_MYSQL_HOST", "")
+LUCKPERMS_MYSQL_PORT = int(os.getenv("LUCKPERMS_MYSQL_PORT", "3306"))
+LUCKPERMS_MYSQL_DATABASE = os.getenv("LUCKPERMS_MYSQL_DATABASE", "")
+LUCKPERMS_MYSQL_USER = os.getenv("LUCKPERMS_MYSQL_USER", "")
+LUCKPERMS_MYSQL_PASSWORD = os.getenv("LUCKPERMS_MYSQL_PASSWORD", "")
+LUCKPERMS_TABLE_PREFIX = os.getenv("LUCKPERMS_TABLE_PREFIX", "luckperms_")
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL     = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 AI_PROVIDER      = os.getenv("AI_PROVIDER", "openrouter").strip().lower()
@@ -989,6 +996,53 @@ ADMIN_ONLY_COMMANDS = {
 }
 
 
+SERVER_COMMANDS = [
+    ("bedwars", "Join or manage BedWars games", "bw.base", ("bw", "bedwars")),
+    ("rejoin", "Rejoin your BedWars game", "bw.cmd.rejoin", ("rejoin",)),
+    ("leave", "Leave your current game", "bw.cmd.leave", ("leave",)),
+    ("shout", "Send a global BedWars shout", "bw.cmd.shout", ("shout",)),
+    ("party", "Manage BedWars party features", "bw.cmd.party", ("party", "p")),
+    ("stats", "View ranked BedWars stats", "rankedbedwars.stats", ("stats",)),
+    ("queue", "Open ranked BedWars queue menu", "rankedbedwars.queue", ("queue",)),
+    ("call", "Call staff from a match", "rankedbedwars.call", ("call",)),
+    ("ss", "Screenshare related command", "rankedbedwars.ss", ("ss",)),
+    ("nick", "Use the nick system", "hynick.nick", ("nick",)),
+    ("unnick", "Remove your nick", "hynick.unnick", ("unnick",)),
+    ("realname", "Check a nicked player real name", "hynick.realname", ("realname",)),
+    ("spawn", "Teleport to spawn", "essentials.spawn", ("spawn",)),
+    ("hub", "Go to hub or lobby", "essentials.spawn", ("hub", "lobby")),
+    ("msg", "Send a private message", "essentials.msg", ("msg", "tell", "w", "whisper")),
+    ("reply", "Reply to private messages", "essentials.reply", ("reply", "r")),
+    ("ignore", "Ignore a player", "essentials.ignore", ("ignore",)),
+    ("afk", "Toggle AFK", "essentials.afk", ("afk",)),
+    ("balance", "Check balance", "essentials.balance", ("balance", "bal", "money")),
+    ("pay", "Pay another player", "essentials.pay", ("pay",)),
+    ("baltop", "Show top balances", "essentials.balancetop", ("baltop", "balancetop")),
+    ("kit", "Claim kits", "essentials.kit", ("kit", "kits")),
+    ("home", "Teleport home", "essentials.home", ("home",)),
+    ("sethome", "Set a home", "essentials.sethome", ("sethome",)),
+    ("delhome", "Delete a home", "essentials.delhome", ("delhome", "remhome")),
+    ("warp", "Use warps", "essentials.warp", ("warp",)),
+    ("warps", "List warps", "essentials.warps", ("warps",)),
+    ("tpa", "Request teleport", "essentials.tpa", ("tpa",)),
+    ("tpaccept", "Accept teleport request", "essentials.tpaccept", ("tpaccept", "tpyes")),
+    ("tpdeny", "Deny teleport request", "essentials.tpdeny", ("tpdeny", "tpno")),
+    ("back", "Return to previous location", "essentials.back", ("back",)),
+    ("fly", "Toggle flight", "essentials.fly", ("fly",)),
+    ("vanish", "Toggle vanish", "essentials.vanish", ("vanish", "v")),
+    ("gamemode", "Change gamemode", "essentials.gamemode", ("gamemode", "gm")),
+    ("tp", "Teleport to a player", "essentials.tp", ("tp",)),
+    ("tphere", "Teleport a player to you", "essentials.tphere", ("tphere", "s")),
+    ("ban", "Ban a player", "essentials.ban", ("ban",)),
+    ("mute", "Mute a player", "essentials.mute", ("mute",)),
+    ("kick", "Kick a player", "essentials.kick", ("kick",)),
+    ("lp", "LuckPerms management", "luckperms.*", ("lp", "luckperms")),
+    ("rbw", "RankedBedwars command", "rankedbedwars.use", ("rbw", "rankedbedwars")),
+]
+
+_LUCKPERMS_CONFIG_CACHE = None
+
+
 async def _fetch_linked_user(discord_id: int) -> dict | None:
     if not RBW_MONGO_URI:
         raise RuntimeError("Missing RBW_MONGO_URI, MONGO_URI, MONGO_PUBLIC_URL, or MONGO_URL")
@@ -1004,10 +1058,148 @@ async def _fetch_linked_user(discord_id: int) -> dict | None:
     return await asyncio.to_thread(query_user)
 
 
-def _user_can_use_command(command_name: str, interaction: discord.Interaction) -> bool:
-    if command_name in ADMIN_ONLY_COMMANDS:
-        return interaction.user.id == AUTHORIZED_ADMIN_ID
-    return True
+def _parse_luckperms_config(text: str) -> dict:
+    data = {}
+    for key in ("address", "database", "username", "password", "table-prefix"):
+        match = re.search(rf"(?m)^\s*{re.escape(key)}:\s*'?([^'\n]+)'?\s*$", text)
+        if match:
+            data[key] = match.group(1).strip()
+    return data
+
+
+def _read_remote_luckperms_config() -> dict:
+    import paramiko
+
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(AI_SSH_HOST, username=AI_SSH_USER, password=AI_SSH_PASSWORD, timeout=15)
+    try:
+        path = posixpath.join(AI_REMOTE_ROOT.rstrip("/"), "plugins/LuckPerms/config.yml")
+        _, stdout, stderr = ssh.exec_command(f"cat '{path}'", timeout=20)
+        text = stdout.read().decode(errors="replace")
+        err = stderr.read().decode(errors="replace")
+        if err.strip() and not text:
+            raise RuntimeError(err.strip())
+        return _parse_luckperms_config(text)
+    finally:
+        ssh.close()
+
+
+async def _luckperms_config() -> dict:
+    global _LUCKPERMS_CONFIG_CACHE
+    if _LUCKPERMS_CONFIG_CACHE:
+        return _LUCKPERMS_CONFIG_CACHE
+
+    if LUCKPERMS_MYSQL_HOST and LUCKPERMS_MYSQL_DATABASE and LUCKPERMS_MYSQL_USER:
+        config = {
+            "address": f"{LUCKPERMS_MYSQL_HOST}:{LUCKPERMS_MYSQL_PORT}",
+            "database": LUCKPERMS_MYSQL_DATABASE,
+            "username": LUCKPERMS_MYSQL_USER,
+            "password": LUCKPERMS_MYSQL_PASSWORD,
+            "table-prefix": LUCKPERMS_TABLE_PREFIX,
+        }
+    else:
+        config = await asyncio.to_thread(_read_remote_luckperms_config)
+
+    if "address" not in config or "database" not in config or "username" not in config:
+        raise RuntimeError("LuckPerms MySQL config is incomplete")
+    config.setdefault("table-prefix", "luckperms_")
+    _LUCKPERMS_CONFIG_CACHE = config
+    return config
+
+
+def _split_host_port(address: str) -> tuple[str, int]:
+    host, _, port = address.partition(":")
+    return host, int(port or 3306)
+
+
+def _node_matches(granted: str, wanted: str) -> bool:
+    granted = granted.lower()
+    wanted = wanted.lower()
+    if granted == "*" or granted == wanted:
+        return True
+    if granted.endswith(".*"):
+        return wanted.startswith(granted[:-1])
+    return False
+
+
+def _has_permission(effective: dict[str, bool], node: str) -> bool:
+    node = node.lower()
+    allowed = False
+    for permission, value in effective.items():
+        if _node_matches(permission, node):
+            allowed = value
+    return allowed
+
+
+def _query_luckperms_user(config: dict, ign: str) -> dict:
+    host, port = _split_host_port(config["address"])
+    prefix = config.get("table-prefix", "luckperms_")
+    connection = pymysql.connect(
+        host=host,
+        port=port,
+        user=config["username"],
+        password=config.get("password", ""),
+        database=config["database"],
+        ssl={},
+        connect_timeout=8,
+        read_timeout=8,
+        cursorclass=pymysql.cursors.DictCursor,
+    )
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(f"SELECT uuid, username, primary_group FROM `{prefix}players` WHERE LOWER(username)=LOWER(%s) LIMIT 1", (ign,))
+            player = cursor.fetchone()
+            if not player:
+                return {"username": ign, "groups": ["default"], "permissions": {}}
+
+            groups = {player.get("primary_group") or "default"}
+            direct_permissions = {}
+
+            cursor.execute(f"SELECT permission, value FROM `{prefix}user_permissions` WHERE uuid=%s", (player["uuid"],))
+            for row in cursor.fetchall():
+                permission = str(row["permission"]).lower()
+                value = bool(row["value"])
+                direct_permissions[permission] = value
+                if value and permission.startswith("group."):
+                    groups.add(permission.split(".", 1)[1])
+
+            group_permissions = {}
+            checked = set()
+            while True:
+                pending = [group for group in groups if group and group not in checked]
+                if not pending:
+                    break
+                checked.update(pending)
+                placeholders = ",".join(["%s"] * len(pending))
+                cursor.execute(
+                    f"SELECT name, permission, value FROM `{prefix}group_permissions` WHERE name IN ({placeholders})",
+                    pending,
+                )
+                for row in cursor.fetchall():
+                    permission = str(row["permission"]).lower()
+                    value = bool(row["value"])
+                    group_permissions[permission] = value
+                    if value and permission.startswith("group."):
+                        groups.add(permission.split(".", 1)[1])
+
+            effective = {}
+            effective.update(group_permissions)
+            effective.update(direct_permissions)
+            return {"username": player.get("username") or ign, "groups": sorted(groups), "permissions": effective}
+    finally:
+        connection.close()
+
+
+async def _server_commands_for_ign(ign: str) -> tuple[list[tuple[str, str, tuple[str, ...]]], list[str]]:
+    config = await _luckperms_config()
+    lp_user = await asyncio.to_thread(_query_luckperms_user, config, ign)
+    effective = lp_user["permissions"]
+    allowed = []
+    for name, description, permission, aliases in SERVER_COMMANDS:
+        if not permission or _has_permission(effective, permission):
+            allowed.append((name, description, aliases))
+    return allowed, lp_user.get("groups", [])
 
 
 @bot.tree.command(name="commands", description="Show the commands you are allowed to use")
@@ -1027,23 +1219,33 @@ async def commands_command(interaction: discord.Interaction):
         )
         return
 
-    allowed = []
-    for command in bot.tree.walk_commands():
-        if isinstance(command, app_commands.Command) and _user_can_use_command(command.name, interaction):
-            allowed.append(command)
-    allowed.sort(key=lambda command: command.name)
+    ign = str(linked_user.get("ign") or "").strip()
+    if not ign:
+        await interaction.followup.send("Your RBW registration has no IGN saved. Re-register in the RBW bot.", ephemeral=True)
+        return
 
-    lines = [f"`/{command.name}` - {command.description or 'No description'}" for command in allowed]
+    try:
+        allowed, groups = await _server_commands_for_ign(ign)
+    except Exception as exc:
+        await interaction.followup.send(f"Could not read server permissions: `{exc}`", ephemeral=True)
+        return
+
+    lines = []
+    for name, description, aliases in allowed:
+        alias_text = f" ({', '.join('/' + alias for alias in aliases if alias != name)})" if len(aliases) > 1 else ""
+        lines.append(f"`/{name}`{alias_text} - {description}")
+
     embed = discord.Embed(
-        title=f"Commands for {interaction.user.display_name}",
+        title=f"Server Commands for {ign}",
         description="\n".join(lines[:45]) or "No commands available.",
         color=discord.Color.from_rgb(85, 255, 255),
         timestamp=discord.utils.utcnow(),
     )
     embed.add_field(name="Registered IGN", value=str(linked_user.get("ign") or "Unknown"), inline=True)
     embed.add_field(name="Allowed commands", value=str(len(allowed)), inline=True)
+    embed.add_field(name="LuckPerms groups", value=", ".join(groups[:12]) or "default", inline=False)
     embed.set_footer(
-        text=f"Showing first 45 of {len(lines)} commands." if len(lines) > 45 else "Based on your registration and Discord permissions."
+        text=f"Showing first 45 of {len(lines)} commands." if len(lines) > 45 else "Based on RBW registration and Minecraft LuckPerms."
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
 
